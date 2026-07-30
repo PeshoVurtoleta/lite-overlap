@@ -1,0 +1,116 @@
+# @zakkster/lite-overlap
+
+> Zero-GC persistent overlap events over a dynamic BVH (2D). Turns "who overlaps
+> now" into a per-frame *delta* -- who just started overlapping (enter), who is
+> still touching (stay), who just stopped (exit) -- and finds every pair once in a
+> single tree self-traversal. **No allocations after construction, on any frame
+> path.** Companion to `@zakkster/lite-bvh` and `@zakkster/lite-aabb` (same
+> `FORMAT_VERSION` buffer contract; no runtime dependency, format agreement only).
+
+Version `1.1.0`. Named exports: `createOverlap`, `VERSION`, `FORMAT_VERSION`.
+
+`FORMAT_VERSION` (integer, currently `1`) is the shared buffer-contract version.
+`@zakkster/lite-aabb` and `@zakkster/lite-bvh` export the identical constant; a
+conformance test asserts all three equal. It is on a separate axis from the semver
+`VERSION` and is copied inline (no runtime dependency on the peers).
+
+It is **not a solver.** No contact normals, no minimum translation vector, no
+impulses. It owns the layer between a spatial index and game logic: pair
+lifecycle, and (this release) all-pairs detection in one descent.
+
+## Model
+
+A frame is `begin()` -> zero or more pair reports -> `end()`. A pair is reported
+either by traversing a BVH (`collectPairs(tree)`) or by hand (`add(a, b)`), or
+both into the same frame. After `end()`, read the delta with
+`drainEnter` / `drainExit`. Ids are non-negative int32 `userData` values (the
+`@zakkster/lite-bvh` contract); `-1` is the empty-slot sentinel and must never be
+passed to `add`.
+
+## API
+
+```ts
+// ALLOCATES -- call at setup. maxPairs is a positive integer; every buffer is
+// sized from it. A new distinct pair past the cap throws atomically (table
+// unchanged, still usable); read stats().highWaterMark to size it.
+function createOverlap(options: { maxPairs: number }): Overlap;
+
+interface Overlap {
+    // Open a frame: flip the internal tag so every slot's stamp is now stale,
+    // bump the telemetry epoch, clear the enter/exit staging. O(1).
+    begin(): void;
+
+    // Report a candidate overlapping pair. HOT: one hash, one probe, one tag
+    // write -- no string/object/closure. Order-invariant ((a,b)==(b,a)) and
+    // idempotent within a frame. a===b is rejected. THROWS atomically if a new
+    // distinct pair would exceed maxPairs (reserve-before-mutate).
+    add(a: number, b: number): void;
+
+    // All-pairs self-traversal over a BVH's readonly SoA, feeding add() directly
+    // -- find every overlapping pair ONCE, no query-box rebuilds. Reports the
+    // tree's FAT-bound pairs: conservative (a reported pair's tight boxes may not
+    // overlap; a real overlap is never missed). Recheck with narrow() and YOUR
+    // tight boxes before acting on geometry. Zero allocation on the traversal
+    // path (fixed node-pair stack sized from tree.maxNodes; fail-closed throw on
+    // an impossible overflow, never grows). Call between begin() and end().
+    collectPairs(tree: BvhTreeView): void;
+
+    // Close the frame: one linear table scan emits an exit for every pair present
+    // last frame but not touched this frame, and removes it. O(capacity).
+    end(): void;
+
+    // Copy this frame's enter / exit ids into caller buffers (bvh query(out)
+    // convention; canonically ordered outA[k] < outB[k]). Non-destructive until
+    // the next begin(). Returns the count, capped at the shorter buffer.
+    drainEnter(outA: Int32Array, outB: Int32Array): number;
+    drainExit(outA: Int32Array, outB: Int32Array): number;
+
+    pairCount(): number;    // live pairs in the table
+    stayCount(): number;    // live pairs that did not enter this frame
+
+    // Diagnostic snapshot (cold path; allocates one plain object by design).
+    // highWaterMark -> size maxPairs from it; stackHighWater -> the traversal
+    // frontier high-water; epoch -> plain-number frame counter (telemetry only).
+    stats(): {
+        pairCount: number; stayCount: number; capacity: number;
+        loadFactor: number; probeHighWater: number; highWaterMark: number;
+        stackHighWater: number; epoch: number;
+    };
+
+    // Silently empty the table without reallocating and WITHOUT emitting exits.
+    // To flush exits on teardown, run one empty begin(); end(); then clear().
+    clear(): void;
+}
+
+// The tight recheck. A BVH stores only FATTENED boxes, so only YOU hold the tight
+// geometry -- narrow takes your two tight boxes, not the tree. Pure boolean AABB
+// overlap; zero allocation, zero dependency. Run it on a pair collectPairs
+// reported, before you act.
+function narrow(boxA: Float32Array, boxB: Float32Array): boolean;   // [minX,minY,maxX,maxY]
+
+// The readonly BVH view collectPairs reads (a @zakkster/lite-bvh instance
+// satisfies it as-is): bboxes (4*maxNodes), children (2*maxNodes, -1/-1 at a
+// leaf), heights (0 at a leaf), userData (leaf id, -1 internal), root, maxNodes.
+interface BvhTreeView { /* see Overlap.d.ts */ }
+```
+
+## Fat vs tight -- the one thing to get right
+
+`collectPairs` reports the boxes the tree holds, which a BVH keeps *fattened* for
+cheap refit. So it is a broadphase: it never misses a real overlap, but it can
+report a near-miss. If you fire damage, a pickup, or a sound on `onEnter` from the
+raw pair, add a `narrow(yourTightA, yourTightB)` gate first. The tree cannot give
+you the tight answer -- it does not store tight boxes -- so you pass your own.
+
+## Guarantees
+
+- Zero runtime dependencies. Single ESM file. `sideEffects: false`.
+- Zero allocation on every frame path: `add`, `collectPairs`, `end`, the drains,
+  and `narrow`. Proven by a `node --expose-gc` torture gate at
+  `maxMajor: 0`, `maxArrayBuffersGrowth: 0`, with a `Set<string>` control that
+  must fail the gate (so the gate is falsifiable).
+- Fail closed on every unverified state: capacity exhaustion, stack overflow, and
+  a corrupt tree (leaf signals that disagree) all throw with a remedy, never
+  silently mis-report.
+
+MIT (c) 2026 Zahary Shinikchiev.

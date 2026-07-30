@@ -25,7 +25,7 @@
  */
 
 /** Package version. Keep in sync with package.json and llms.txt (three-place sync). */
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 /**
  * The version of the shared FORMAT contract (see @zakkster/lite-aabb FORMAT.md),
@@ -147,6 +147,124 @@ export function createOverlap(options) {
         }
     }
 
+    /**
+     * Core pair insertion -- the O0 hot body, extracted verbatim so the O1
+     * self-traversal (`collectPairs`, decision E3) feeds the SAME code path the
+     * caller-fed `add` does. That shared implementation is exactly what makes the
+     * N-query path a valid differential oracle for the traversal: same table,
+     * same lifecycle, one insertion routine. HOT BODY: one hash, one probe loop,
+     * one tag write. No string / object / closure. Order-invariant (canonicalizes
+     * lo < hi), idempotent within a frame, rejects `a === b`.
+     * @param {number} a
+     * @param {number} b
+     */
+    function addPair(a, b) {
+        if (a === b) return;
+        let lo, hi;
+        if (a < b) { lo = a; hi = b; } else { lo = b; hi = a; }
+
+        let i = (Math.imul(lo, HASH_A) ^ Math.imul(hi, HASH_B)) >>> 0 & mask;
+        let probe = 0;
+        for (;;) {
+            const ka = slotKeyA[i];
+            if (ka === EMPTY) {
+                // Miss: a new pair this frame. Reserve before mutating (D4).
+                if (pairCount >= maxPairs) throw new Error(FULL_MSG);
+                slotKeyA[i] = lo;
+                slotKeyB[i] = hi;
+                slotTag[i] = tag;
+                pairCount++;
+                if (pairCount > highWaterMark) highWaterMark = pairCount;
+                enterA[enterCount] = lo;
+                enterB[enterCount] = hi;
+                enterCount++;
+                if (probe > probeHighWater) probeHighWater = probe;
+                return;
+            }
+            if (ka === lo && slotKeyB[i] === hi) {
+                // Hit: present already. Stamp if first touch this frame (stay),
+                // else a duplicate add within the frame is a no-op.
+                if (slotTag[i] !== tag) slotTag[i] = tag;
+                if (probe > probeHighWater) probeHighWater = probe;
+                return;
+            }
+            i = (i + 1) & mask;
+            probe++;
+        }
+    }
+
+    // --- O1 self-traversal state (decisions 0002 E1/E4) -----------------------
+    //
+    // The traversal stack is an explicit Int32Array of node-pairs (2 int32 per
+    // pair). E1 is a NO-GROW contract: reserve-before-push, throw on overflow,
+    // NEVER `new Int32Array` mid-traversal. The buffer is sized ONCE per tree
+    // node-count on the cold path (`ensureStack`, called at the top of
+    // `collectPairs` before the loop) and reused across every later collect on a
+    // same-or-smaller tree, so the 200k-collect alloc gate sees zero growth.
+    //
+    // NOTE (spec deviation, flagged in the O1 report): decision E1 says "size the
+    // stack from maxNodes at construction". The O0 door `createOverlap({maxPairs})`
+    // has no maxNodes -- the tree, and thus its maxNodes, only arrives at
+    // `collectPairs(tree)`. Adding a required maxNodes option would break every
+    // shipped O0 caller. Resolution that preserves BOTH the O0 door and E1's real
+    // guarantee (never allocate mid-traversal): allocate lazily-once keyed on
+    // tree.maxNodes, grow only between traversals (cold), never inside the loop.
+    let traversalStack = null;    // Int32Array, lazily sized; never grows mid-loop.
+    let stackOverflowMsg = '';    // built once per size on the cold path (not hot).
+    let stackHwSlots = 0;         // traversal frontier high-water, in int32 slots.
+
+    // Corruption message base, built ONCE (E4 fail-closed). The offending node id
+    // is appended only on the throw (cold, terminal), never on the hot path.
+    const CORRUPT_MSG = 'lite-overlap: corrupt tree, leaf signals (children/height/userData) disagree at node ';
+
+    // Cold-path base for the duplicate-userData fault (E4), built ONCE like
+    // CORRUPT_MSG. The two node ids and the shared id are concatenated only on the
+    // throw (terminal), never on the passing hot path.
+    const DUP_ID_MSG = 'lite-overlap: corrupt tree -- distinct leaves ';
+
+    /**
+     * Cold path. (Re)size the node-pair stack for a tree of `maxNodes` nodes.
+     * Allocates only when the current buffer is missing or too small; on a stable
+     * tree this runs its allocation exactly once, ever.
+     *
+     * STACK BOUND DERIVATION (E1 -- conservative, holds for ANY tree shape).
+     * The stack holds the live frontier of pending node-pairs, not a root-to-leaf
+     * path. Let H be the tree height. Two kinds of pending item, and at most one
+     * cross-recursion is ever in progress at a time:
+     *
+     *   - SELF-pairs: the self-descent is a binary DFS over internal nodes; the
+     *     pending siblings along the active spine number at most H + 1.
+     *   - CROSS-pairs: when a self-pair (n,n) is popped, its cross seed (L,R) is
+     *     pushed LAST, so it is popped FIRST and its cross-recursion runs to
+     *     completion before any self-pair beneath it is touched (a cross descent
+     *     never pushes a self-pair). Each cross descent replaces (a,b) with two
+     *     pairs whose height-sum h(a)+h(b) is strictly smaller, so that recursion
+     *     nests at most 2H-2 deep, leaving at most 2H-1 pending.
+     *
+     *   => simultaneous pending pairs <= (H + 1) + (2H - 1) = 3H.
+     *
+     * A structurally-degenerate binary tree has H <= leafCount - 1, and with
+     * nodeCount = 2*leafCount - 1 <= maxNodes we get leafCount <= (maxNodes+1)/2,
+     * hence 3H <= 1.5*maxNodes - 1.5. We allocate `2 * maxNodes` PAIRS
+     * (`4 * maxNodes` int32 slots) -- above that worst case with margin, so the
+     * overflow throw is unreachable for a well-formed tree and is a genuine
+     * fail-closed corruption guard, not dead code. bvh rotations keep real height
+     * at O(log n) (~13 at N=2000), so this cap is enormously slack in practice;
+     * over-allocating a few int32 slots at setup is free, a mid-frame alloc is not.
+     * @param {number} maxNodes
+     */
+    function ensureStack(maxNodes) {
+        const pairsBound = maxNodes * 2;   // >= 3H with margin (see derivation).
+        const slots = pairsBound * 2;      // 2 int32 per pending pair.
+        if (traversalStack === null || traversalStack.length < slots) {
+            traversalStack = new Int32Array(slots);
+            // D4-shaped remedy message, built here on the cold path (not the hot
+            // body): names the cap and the fix. Never allocated per push.
+            stackOverflowMsg = 'lite-overlap: traversal stack overflow (' +
+                pairsBound + '). Raise maxNodes/maxPairs.';
+        }
+    }
+
     return {
         /**
          * Open a frame. Flips the tag (so every slot's stamp is now stale),
@@ -168,38 +286,7 @@ export function createOverlap(options) {
          * @param {number} b
          */
         add(a, b) {
-            if (a === b) return;
-            let lo, hi;
-            if (a < b) { lo = a; hi = b; } else { lo = b; hi = a; }
-
-            let i = (Math.imul(lo, HASH_A) ^ Math.imul(hi, HASH_B)) >>> 0 & mask;
-            let probe = 0;
-            for (;;) {
-                const ka = slotKeyA[i];
-                if (ka === EMPTY) {
-                    // Miss: a new pair this frame. Reserve before mutating (D4).
-                    if (pairCount >= maxPairs) throw new Error(FULL_MSG);
-                    slotKeyA[i] = lo;
-                    slotKeyB[i] = hi;
-                    slotTag[i] = tag;
-                    pairCount++;
-                    if (pairCount > highWaterMark) highWaterMark = pairCount;
-                    enterA[enterCount] = lo;
-                    enterB[enterCount] = hi;
-                    enterCount++;
-                    if (probe > probeHighWater) probeHighWater = probe;
-                    return;
-                }
-                if (ka === lo && slotKeyB[i] === hi) {
-                    // Hit: present already. Stamp if first touch this frame (stay),
-                    // else a duplicate add within the frame is a no-op.
-                    if (slotTag[i] !== tag) slotTag[i] = tag;
-                    if (probe > probeHighWater) probeHighWater = probe;
-                    return;
-                }
-                i = (i + 1) & mask;
-                probe++;
-            }
+            addPair(a, b);
         },
 
         /**
@@ -223,6 +310,155 @@ export function createOverlap(options) {
                     i++;
                 }
             }
+        },
+
+        /**
+         * O1 -- iterative BVH self-traversal (decision 0002 E4). Reads the tree's
+         * readonly SoA and feeds every FAT-box-overlapping leaf pair to `add`
+         * (E3: this feeds `add` only -- the CALLER owns begin()/end(); one frame,
+         * one delta, however many sources feed it). Does NOT import bvh: the tree
+         * is a plain argument, format agreement only (C1). Zero allocation on the
+         * traversal: the node-pair stack is the pre-sized buffer, no closure and
+         * no object per node-pair.
+         *
+         * FAT vs TIGHT (E2): the pairs reported here are FAT-bound -- conservative
+         * broadphase, because the tree stores only FATTENED boxes. A caller acting
+         * on geometry (damage, pickup) MUST recheck each pair with ITS OWN tight
+         * boxes first -- call `narrow(yourTightA, yourTightB)`; the tree cannot
+         * answer the tight question. Comparing this raw set against a TIGHT
+         * brute-force set flags a correct traversal as over-reporting -- do not.
+         * The differential oracle is the fat-box N-query set (same boxes, same
+         * predicate).
+         *
+         * @param {{ bboxes: Float32Array, children: Int32Array, heights: Int32Array,
+         *   userData: Int32Array, root: number, maxNodes: number }} tree
+         */
+        collectPairs(tree) {
+            // Read the SoA members into locals ONCE (hot-path law: no repeated
+            // property loads inside the loop).
+            const bboxes = tree.bboxes;
+            const children = tree.children;
+            const heights = tree.heights;
+            const userData = tree.userData;
+            const root = tree.root;
+
+            // Cold: size the stack for this tree. Never inside the loop below.
+            ensureStack(tree.maxNodes);
+            const stack = traversalStack;
+            const cap = stack.length;   // slots
+
+            if (root < 0) return;       // empty tree -> zero pairs (E4).
+
+            // Seed / single-leaf, with the root's fail-closed leaf cross-check (E4).
+            const rootLeaf = children[root * 2] === -1;
+            if (rootLeaf !== (heights[root] === 0) || rootLeaf !== (userData[root] !== -1)) {
+                throw new Error(CORRUPT_MSG + root);
+            }
+            if (rootLeaf) return;       // single leaf -> zero pairs (E4).
+
+            let sp = 0;
+            stack[sp++] = root; stack[sp++] = root;   // self-pair (root, root).
+
+            while (sp > 0) {
+                if (sp > stackHwSlots) stackHwSlots = sp;
+                const b = stack[--sp];
+                const a = stack[--sp];
+
+                if (a === b) {
+                    // ---- SELF-PAIR (n, n): n is internal by construction. ----
+                    const n2 = a * 2;
+                    const L = children[n2];
+                    const R = children[n2 + 1];
+                    // Reserve the worst case up front: up to 3 pairs = 6 slots
+                    // ((L,L), (R,R), (L,R)). Reserve-before-push, throw on overflow
+                    // (E1); never grow. The message is pre-built (cold).
+                    if (sp + 6 > cap) throw new Error(stackOverflowMsg);
+                    // Fail-closed leaf cross-check of L and R (E4).
+                    const Lleaf = children[L * 2] === -1;
+                    if (Lleaf !== (heights[L] === 0) || Lleaf !== (userData[L] !== -1)) throw new Error(CORRUPT_MSG + L);
+                    const Rleaf = children[R * 2] === -1;
+                    if (Rleaf !== (heights[R] === 0) || Rleaf !== (userData[R] !== -1)) throw new Error(CORRUPT_MSG + R);
+                    // *** THE 94-vs-1,543 LINE (E4) ***: a self-pair MUST re-emit
+                    // the self-pairs of its INTERNAL children, not only the cross
+                    // term. Dropping (L,L)/(R,R) keeps only root-straddling pairs
+                    // and silently loses every pair living inside one subtree --
+                    // 94 pairs instead of 1,543, and nothing throws. Emit them.
+                    if (!Lleaf) { stack[sp++] = L; stack[sp++] = L; }   // (L, L)
+                    if (!Rleaf) { stack[sp++] = R; stack[sp++] = R; }   // (R, R)
+                    stack[sp++] = L; stack[sp++] = R;                    // cross (L, R)
+                } else {
+                    // ---- CROSS-PAIR (a, b): fat-box AABB overlap (E4). -------
+                    const a4 = a * 4;
+                    const b4 = b * 4;
+                    if (bboxes[a4] <= bboxes[b4 + 2] && bboxes[b4] <= bboxes[a4 + 2] &&
+                        bboxes[a4 + 1] <= bboxes[b4 + 3] && bboxes[b4 + 1] <= bboxes[a4 + 3]) {
+                        const aLeaf = children[a * 2] === -1;
+                        if (aLeaf !== (heights[a] === 0) || aLeaf !== (userData[a] !== -1)) throw new Error(CORRUPT_MSG + a);
+                        const bLeaf = children[b * 2] === -1;
+                        if (bLeaf !== (heights[b] === 0) || bLeaf !== (userData[b] !== -1)) throw new Error(CORRUPT_MSG + b);
+                        if (aLeaf && bLeaf) {
+                            // Both leaves overlap: a candidate pair. The two nodes
+                            // are distinct indices by construction (E4), so equal
+                            // userData is a data-integrity fault -- two distinct
+                            // leaves sharing an id. FAIL CLOSED: without this,
+                            // add(id, id) is rejected as a self-pair (D1) and the
+                            // real collision is SILENTLY dropped -- the exact
+                            // missed-collision failure this session prevents.
+                            if (userData[a] === userData[b]) {
+                                throw new Error(DUP_ID_MSG + a + ' and ' + b +
+                                    ' share userData ' + userData[a] + '. Leaf userData must be unique.');
+                            }
+                            // add() dedups and canonicalizes lo < hi (D1/E3).
+                            addPair(userData[a], userData[b]);
+                        } else {
+                            if (sp + 4 > cap) throw new Error(stackOverflowMsg);
+                            // Descend the TALLER node (tie -> a). The taller is
+                            // internal by construction: a leaf has height 0, which
+                            // cannot be strictly tallest unless the other is a leaf
+                            // too (handled above). Expand from ONE side only, so
+                            // no cross relationship is visited twice (E4 / E1).
+                            if (heights[a] >= heights[b]) {
+                                const c2 = a * 2;
+                                const c0 = children[c2];
+                                const c1 = children[c2 + 1];
+                                stack[sp++] = c0; stack[sp++] = b;
+                                stack[sp++] = c1; stack[sp++] = b;
+                            } else {
+                                const c2 = b * 2;
+                                const c0 = children[c2];
+                                const c1 = children[c2 + 1];
+                                stack[sp++] = a; stack[sp++] = c0;
+                                stack[sp++] = a; stack[sp++] = c1;
+                            }
+                        }
+                    }
+                    // miss -> prune (drop the pair).
+                }
+            }
+        },
+
+        /**
+         * O1 -- the TIGHT recheck (decision E2). Pure boolean AABB overlap of two
+         * caller-supplied TIGHT boxes, each a `Float32Array(4)`
+         * `[minX, minY, maxX, maxY]`. Zero allocation, does NOT touch the tree,
+         * imports nothing (a caller need not pull in lite-aabb for the one
+         * predicate).
+         *
+         * WHY THE CALLER'S BOXES, not the tree's: `collectPairs` reports FAT-bound
+         * pairs (conservative broadphase) because bvh stores only FATTENED boxes
+         * (`bboxes` / `getBounds` are the fat box, never the caller's original
+         * tight box). A recheck reading tree data would re-ask the SAME fat
+         * predicate -- always true for a reported pair, filtering nothing. The
+         * tight boxes exist only where they were created: with the caller, before
+         * fattening. So the caller passes them here for a pair it cares about.
+         *
+         * @param {Float32Array} boxA tight box `[minX, minY, maxX, maxY]`.
+         * @param {Float32Array} boxB tight box `[minX, minY, maxX, maxY]`.
+         * @returns {boolean} whether the two tight boxes overlap (touching counts).
+         */
+        narrow(boxA, boxB) {
+            return boxA[0] <= boxB[2] && boxB[0] <= boxA[2] &&
+                boxA[1] <= boxB[3] && boxB[1] <= boxA[3];
         },
 
         /**
@@ -286,6 +522,7 @@ export function createOverlap(options) {
                 loadFactor: pairCount / capacity,
                 probeHighWater,
                 highWaterMark,
+                stackHighWater: stackHwSlots >> 1,   // slots -> pending node-pairs.
                 epoch: frameCounter,
             };
         },
