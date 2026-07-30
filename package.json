@@ -1,0 +1,74 @@
+{
+  "name": "@zakkster/lite-overlap",
+  "version": "1.0.0",
+  "description": "Zero-GC persistent overlap events over a dynamic BVH (2D): turns a per-frame set of overlapping pairs into a per-frame delta -- enter / stay / exit -- with zero allocation per frame. Open-addressed Int32Array pair table, 1-bit alternating-tag mark-sweep. Single-file ESM, zero runtime deps.",
+  "type": "module",
+  "main": "./Overlap.js",
+  "module": "./Overlap.js",
+  "types": "./Overlap.d.ts",
+  "exports": {
+    ".": {
+      "types": "./Overlap.d.ts",
+      "node": "./Overlap.js",
+      "import": "./Overlap.js",
+      "default": "./Overlap.js"
+    }
+  },
+  "files": [
+    "Overlap.js",
+    "Overlap.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --expose-gc --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js",
+    "torture": "node --expose-gc test/torture.mjs",
+    "verify": "npm test && npm run torture"
+  },
+  "keywords": [
+    "overlap",
+    "collision",
+    "broadphase",
+    "trigger",
+    "enter-exit",
+    "pair",
+    "spatial",
+    "bvh",
+    "aabb",
+    "2d",
+    "game-dev",
+    "zero-gc",
+    "allocation-free",
+    "typed-array",
+    "int32array",
+    "esm"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@zakkster/lite-aabb": "^2.0.0",
+    "@zakkster/lite-bvh": "^2.0.0",
+    "@zakkster/lite-gc-profiler": "^1.12.0",
+    "@zakkster/lite-leak": "^1.8.0"
+  },
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "homepage": "https://github.com/PeshoVurtoleta/lite-overlap#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-overlap.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-overlap/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "sideEffects": false
+}
