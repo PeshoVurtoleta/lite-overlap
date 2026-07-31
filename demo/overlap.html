@@ -358,6 +358,7 @@ $cap.textContent = overlap.stats().capacity;   // initial UI from a peek
 
 /* ---- viewport sizing (HiDPI) ------------------------------------------- */
 let W = 0, H = 0, DPR = 1, seeded = false;
+let sparkW = 1;                       // cached spark CSS width (read in resize, not per draw)
 function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     const r = $view.getBoundingClientRect();
@@ -366,7 +367,8 @@ function resize() {
     $view.width = W * DPR; $view.height = H * DPR;
     vctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const sr = $spark.getBoundingClientRect();
-    $spark.width = Math.max(1, Math.floor(sr.width)) * DPR;
+    sparkW = Math.max(1, Math.floor(sr.width));   // cache: layout read ONCE here, never in drawSpark
+    $spark.width = sparkW * DPR;
     $spark.height = 56 * DPR;
     sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     // Seed only once the stage has a real size (module scripts are deferred but
@@ -487,14 +489,14 @@ function splitPush(key, kind) {
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let COL = {};
 function reloadColors() {
-    COL = { steady: css('--steady'), enter: css('--enter'), exit: css('--exit'), text: css('--text-dim'), good: css('--good'), bad: css('--bad') };
+    COL = { steady: css('--steady'), enter: css('--enter'), exit: css('--exit'), text: css('--text-dim'), good: css('--good'), bad: css('--bad'), grid: css('--viewport-grid') };
 }
 
 function draw() {
     vctx.clearRect(0, 0, W, H);
 
     // phosphor grid
-    vctx.strokeStyle = css('--viewport-grid'); vctx.lineWidth = 1;
+    vctx.strokeStyle = COL.grid; vctx.lineWidth = 1;
     const g = 40;
     vctx.beginPath();
     for (let x = g; x < W; x += g) { vctx.moveTo(x, 0); vctx.lineTo(x, H); }
@@ -537,7 +539,7 @@ function draw() {
 }
 
 function drawSpark() {
-    const w = $spark.getBoundingClientRect().width, h = 56;
+    const w = sparkW, h = 56;
     sctx.clearRect(0, 0, w, h);
     if (!heapSupported || sparkCount < 2) {
         sctx.fillStyle = COL.text; sctx.font = '10px ' + '"SF Mono", monospace';
