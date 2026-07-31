@@ -46,6 +46,7 @@ for (let k = 0; k < nExit; k++) onOverlapEnd(exitA[k], exitB[k]);
 - [Why](#why) - [Install](#install) - [The frame cycle](#the-frame-cycle)
 - [Two ways to feed a frame](#two-ways-to-feed-a-frame)
 - [Fat vs tight: the one thing to get right](#fat-vs-tight-the-one-thing-to-get-right)
+- [Layers and filters](#layers-and-filters)
 - [How it works](#how-it-works)
 - [API](#api) - [Guarantees](#guarantees) - [License](#license)
 
@@ -137,6 +138,47 @@ if (narrow(tightA, tightB)) {
 tight boxes -- only you have them. It is a pure `[minX, minY, maxX, maxY]` overlap
 test, zero allocation, zero dependency.
 
+## Layers and filters
+
+A real trigger system wants *"player against pickups, not pickups against each
+other."* Put entities on layers and switch which layers interact -- the descent
+skips filtered pairs **as it goes**, so you never pay for a pair you then throw
+away:
+
+```js
+const PLAYER = 0, PICKUP = 1, WALL = 2;
+ov.setLayer(playerId, PLAYER);
+ov.setLayer(coinId, PICKUP);
+ov.setInteract(PICKUP, PICKUP, false);   // pickups ignore each other
+ov.setInteract(PLAYER, WALL, false);     // walls are for something else
+
+ov.setEnabled(deadEntityId, false);      // generates no pairs; its live pairs exit
+
+ov.begin();
+ov.collectPairs(tree);                   // filtered during the descent
+ov.end();
+```
+
+Three properties make it safe to lean on:
+
+- **Results-preserving.** Filtering changes *cost*, never *results*: the filtered
+  set is exactly the unfiltered set with the disabled pairs removed. It cannot
+  invent or reorder a pair.
+- **Rotation-proof.** State is keyed by `userData` (the entity id you assigned),
+  never by a tree node id -- so it stays correct when the BVH rotates to rebalance.
+  A per-node cached "subtree layer mask" would silently go stale on the next refit
+  and drop real collisions; this package deliberately keeps none. (`decisions/0003-filters.md`.)
+- **Exits fire.** Disable an entity, or turn off a layer interaction, and the pairs
+  that should end **do** -- each fires an exit exactly once, on that frame, through
+  the same mark-sweep everything else uses. No phantom live pairs, no "my exit
+  never fired."
+
+The 32x32 interaction matrix is symmetric by construction (`setInteract(a, b, …)`
+also sets `(b, a)`) and starts **all-on**, so an instance you never call these on
+behaves exactly as it did before layers existed. Filter state is sampled inside
+`collectPairs` -- set it **before** the frame's collect. `maxEntityId` is an
+optional constructor cap for the layer arrays; omit it and they grow on demand.
+
 ## How it works
 
 - **Pair identity is two parallel `Int32Array`s**, never one packed number. Two
@@ -162,11 +204,14 @@ test, zero allocation, zero dependency.
 
 | Member | What it does |
 | --- | --- |
-| `createOverlap({ maxPairs })` | Allocate an instance and its table. The only allocating call. |
+| `createOverlap({ maxPairs, maxEntityId? })` | Allocate an instance and its table. The only allocating call. `maxEntityId` optionally caps the filter arrays. |
 | `begin()` | Open a frame. O(1). |
-| `add(a, b)` | Report a pair by hand. Order-invariant, idempotent, throws atomically past `maxPairs`. |
-| `collectPairs(tree)` | Report every overlapping pair in a BVH, once. Fat-bound; feeds `add`. |
+| `add(a, b)` | Report a pair by hand. Order-invariant, idempotent, throws atomically past `maxPairs`. Unfiltered (the raw door). |
+| `collectPairs(tree)` | Report every overlapping pair in a BVH, once. Fat-bound; filtered during the descent; feeds `add`. |
 | `end()` | Close the frame; emit and remove exits. O(capacity). |
+| `setLayer(id, layer)` | Put entity `id` on a layer `[0, 31]` (default 0). Keyed by `userData`; cold path. |
+| `setInteract(a, b, on)` | Turn the layer pair `(a, b)` on/off. Symmetric; all-on by default. Cold path. |
+| `setEnabled(id, on)` | Enable/disable an entity. Disabled = no pairs; its live pairs exit once. Cold path. |
 | `drainEnter(outA, outB)` / `drainExit(outA, outB)` | Copy this frame's enter / exit ids into your buffers; return the count. |
 | `pairCount()` / `stayCount()` | Live pairs / live pairs that did not enter this frame. |
 | `stats()` | `pairCount`, `stayCount`, `capacity`, `loadFactor`, `probeHighWater`, `highWaterMark`, `stackHighWater`, `epoch`. Cold path. |
@@ -190,6 +235,11 @@ Full types and per-method contracts are in `Overlap.d.ts`.
   identical to a brute-force O(N^2) check and to the caller-fed `query()` path over
   a seeded fuzz corpus, including degenerate trees (empty, single leaf, all
   identical, all at one point, single row).
+- **Filtering changes cost, not results** -- the filtered set is asserted equal to
+  the unfiltered set post-filtered in JS over the corpus, and equal to the brute
+  filtered oracle **every frame** through rotation-provoking motion (so no cached
+  node-keyed mask can go stale). Disabling an entity or a layer fires each affected
+  exit exactly once. Filtering active keeps the alloc gate at zero.
 
 ## License
 

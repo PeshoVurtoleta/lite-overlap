@@ -1,8 +1,16 @@
 # 0003 -- Layers, filters, and the subtree-mask question decided on evidence
 
-- **Status:** proposed (planning chapter; ratified at O2 kickoff)
+- **Status:** ACCEPTED -- shipped in v1.2.0 and proven by the test suite (F2
+  results-preserving corpus, the F3 rotation adversary, F4 exit-on-disable, and
+  the fail-closed validation matrix; 90 tests green, torture gate `ok`, control
+  still trips). Implementation note: F1's `layerOf` and F4's enabled bit are
+  PACKED into one `userData`-keyed `Int32Array` (`entityState`: layer in bits
+  0..4, disabled in bit 5), so the leaf-leaf filter reads one slot per endpoint;
+  and the array grows lazily-once on the cold setter path (optional `maxEntityId`
+  pre-sizes it and makes it fail-closed) -- the same "the door has no such bound
+  at construction" resolution O1 used for the traversal stack.
 - **Date:** 2026-07-31
-- **Session:** O2 (v1.2.0), planned
+- **Session:** O2 (v1.2.0), shipped
 - **Scope:** the pre-code decisions the ROADMAP (O2 TASKS) requires on the record
   before filtering exists. F1 where layer state lives; F2 the collision matrix;
   F3 **the session's one real design risk** -- whether a subtree-layer mask can

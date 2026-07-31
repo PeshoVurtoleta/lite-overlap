@@ -17,6 +17,16 @@
  *   D4  capacity exhaustion is atomic: reserve-before-mutate throw.
  *   C1  FORMAT_VERSION is inline; conformance is a test, not a runtime import.
  *   C2  clear() is silent and single-purpose; teardown exits go via an empty frame.
+ * O1 (self-traversal) decisions are in `decisions/0002-traversal.md`.
+ * O2 (layers/filters) decisions are in `decisions/0003-filters.md`:
+ *   F1  filter state is keyed by `userData` (entity id), never by node id --
+ *       rotation-immune, since a refit relinks node ids but never touches userData.
+ *   F2  a symmetric 32-bit collision matrix; `shouldTest` is one AND. Default is
+ *       all-pairs-enabled, so an unfiltered instance is the exact O1 identity.
+ *   F3  NO cached node-keyed subtree masks (they go stale silently under bvh
+ *       rotations, which expose no hook) -- leaf-level filtering only.
+ *   F4  filter at collect time, before `add`: a now-filtered pair is simply not
+ *       re-stamped and exits through the normal O0 mark-sweep -- no special path.
  *
  * Zero runtime dependencies. ASCII-only source.
  *
@@ -25,7 +35,7 @@
  */
 
 /** Package version. Keep in sync with package.json and llms.txt (three-place sync). */
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 /**
  * The version of the shared FORMAT contract (see @zakkster/lite-aabb FORMAT.md),
@@ -48,6 +58,19 @@ const HASH_B = 19349663;
 const EMPTY = -1;
 
 /**
+ * Entity-state packing (O2, decision F1). The per-entity filter state -- its
+ * layer AND its enabled bit -- is packed into ONE `userData`-keyed Int32Array
+ * slot: layer in bits 0..4, the disabled flag in bit 5. So the leaf-leaf filter
+ * reads a SINGLE slot per endpoint (bytes in a hot body, not instructions), and
+ * the default value `0` means layer 0 + enabled -- an entity nobody has touched
+ * is the O1 identity. Highest layer index is 31 (32 layers, the Unity/Box2D
+ * convention, one bitmask row per layer in the collision matrix).
+ */
+const LAYER_MASK = 31;      // bits 0..4: layer index in [0, 31].
+const DISABLED_BIT = 32;    // bit 5: set => entity disabled (F4). 0 => enabled.
+const MAX_LAYER = 31;
+
+/**
  * Smallest power of two >= n (n >= 1). Used once, at construction.
  * @param {number} n
  * @returns {number}
@@ -67,7 +90,14 @@ function nextPow2(n) {
  * Create an overlap instance owning one pair table. Every buffer is allocated
  * here, once; nothing allocates on any frame path afterwards.
  *
- * @param {{ maxPairs: number }} options
+ * `maxEntityId` (O2, optional) caps the `userData`-keyed filter arrays: when
+ * given, `setLayer` / `setEnabled` fail closed above it and no filter buffer ever
+ * grows; when omitted, those arrays grow lazily-once on the cold config path the
+ * first time a larger id is filtered (never on a frame path), exactly as the O1
+ * traversal stack grows from `tree.maxNodes` -- the door carries no such bound at
+ * construction, so it is discovered late and sized cold, never mid-frame.
+ *
+ * @param {{ maxPairs: number, maxEntityId?: number }} options
  * @returns {import('./Overlap.js').Overlap}
  */
 export function createOverlap(options) {
@@ -76,13 +106,20 @@ export function createOverlap(options) {
     }
     // Fail closed on an unknown option key with a did-you-mean hint (suite Law).
     for (const key in options) {
-        if (key !== 'maxPairs') {
-            throw new Error('lite-overlap: unknown option "' + key + '". Did you mean "maxPairs"?');
+        if (key !== 'maxPairs' && key !== 'maxEntityId') {
+            throw new Error('lite-overlap: unknown option "' + key + '". Expected "maxPairs" or "maxEntityId".');
         }
     }
     const maxPairs = options.maxPairs;
     if (typeof maxPairs !== 'number' || !Number.isInteger(maxPairs) || maxPairs < 1) {
         throw new RangeError('lite-overlap: maxPairs must be a positive integer, got ' + String(maxPairs) + '.');
+    }
+    // O2 filter-array cap (optional). Present => fixed size, fail-closed above it;
+    // absent => the arrays grow lazily-once on the cold setLayer/setEnabled path.
+    const hasEntityCap = options.maxEntityId !== undefined;
+    const entityCap = hasEntityCap ? options.maxEntityId : -1;
+    if (hasEntityCap && (typeof entityCap !== 'number' || !Number.isInteger(entityCap) || entityCap < 0)) {
+        throw new RangeError('lite-overlap: maxEntityId must be a non-negative integer, got ' + String(entityCap) + '.');
     }
 
     // Capacity is a power of two sized from maxPairs at load factor 0.7 (D2), so
@@ -265,6 +302,73 @@ export function createOverlap(options) {
         }
     }
 
+    // --- O2 filter state (decisions 0003 F1/F2) -------------------------------
+    //
+    // The 32x32 collision matrix (F2): row `i` is a bitmask of the layers `i`
+    // interacts with. `shouldTest(a, b)` is `(matrix[a] >>> b) & 1`. Default is
+    // ALL bits set -- every layer tests every layer -- so an instance whose
+    // layers are never touched reports exactly the O1 set (unfiltered identity).
+    const matrix = new Int32Array(32);
+    matrix.fill(-1);   // -1 = all 32 bits set (F2 default: all-pairs-enabled).
+
+    // The userData-keyed packed entity state (F1): layer | disabled, one slot per
+    // entity id. Pre-sized when capped; otherwise length 0 and grown cold-once by
+    // growEntity below. Default 0 (layer 0 + enabled) is the O1 identity, so an
+    // id never assigned still filters correctly whether or not the array reaches it.
+    let entityState = hasEntityCap ? new Int32Array(entityCap + 1) : new Int32Array(0);
+
+    // Latch: false => collectPairs runs the exact O1 leaf-leaf emit with ZERO
+    // filter overhead and byte-identical results; the first setLayer/setInteract/
+    // setEnabled flips it. Filtering is opt-in; the unfiltered set is the identity.
+    let filtersActive = false;
+
+    /**
+     * Cold config path. Ensure the packed entity-state array covers id `id`,
+     * growing to the next power of two >= id+1 and copying (the new region
+     * zero-fills to layer 0 + enabled). Only reached on an UNCAPPED instance --
+     * a capped one fail-closes above `entityCap` instead of growing. Never called
+     * on any frame path; mirrors ensureStack's lazily-once sizing.
+     * @param {number} id
+     */
+    function growEntity(id) {
+        if (id < entityState.length) return;
+        const grown = new Int32Array(nextPow2(id + 1));
+        grown.set(entityState);
+        entityState = grown;
+    }
+
+    /**
+     * Cold path. Resolve an entity id to a writable slot for a filter setter:
+     * validate it is a non-negative integer, then either fail closed above the
+     * cap (capped instance) or grow to reach it (uncapped). Returns nothing; the
+     * caller writes `entityState[id]` after this succeeds.
+     * @param {number} id
+     * @param {string} who setter name, for the error message.
+     */
+    function reachEntity(id, who) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0) {
+            throw new RangeError('lite-overlap: ' + who + ' requires a non-negative integer userData, got ' + String(id) + '.');
+        }
+        if (hasEntityCap) {
+            if (id > entityCap) {
+                throw new RangeError('lite-overlap: userData ' + id + ' exceeds maxEntityId (' + entityCap + '). Raise maxEntityId.');
+            }
+        } else {
+            growEntity(id);
+        }
+    }
+
+    /**
+     * Cold path. Validate a layer index is an integer in [0, 31] (F2).
+     * @param {number} v
+     * @param {string} who
+     */
+    function checkLayer(v, who) {
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > MAX_LAYER) {
+            throw new RangeError('lite-overlap: ' + who + ' must be an integer in [0, 31], got ' + String(v) + '.');
+        }
+    }
+
     return {
         /**
          * Open a frame. Flips the tag (so every slot's stamp is now stale),
@@ -282,6 +386,11 @@ export function createOverlap(options) {
          * hash, one probe loop, one tag write. No string / object / closure.
          * Order-invariant (canonicalizes lo < hi) and idempotent within a frame.
          * `a === b` is rejected. `a` and `b` must be non-negative int32 ids.
+         *
+         * This is the raw primitive door and is UNFILTERED by design: O2 layer /
+         * enabled filtering (F4) is applied inside `collectPairs`, before it reaches
+         * this method. A caller feeding pairs manually owns its own filtering; keep
+         * `add` pure so it stays the differential oracle for the traversal.
          * @param {number} a
          * @param {number} b
          */
@@ -330,6 +439,15 @@ export function createOverlap(options) {
          * The differential oracle is the fat-box N-query set (same boxes, same
          * predicate).
          *
+         * FILTERING (O2, decisions F1/F2/F4): if any of `setLayer` / `setInteract`
+         * / `setEnabled` has been called, each leaf-leaf candidate is mask-tested
+         * (by the two endpoints' `userData`-keyed layers, and their enabled bits)
+         * before `add`. Filtering changes COST, never results relative to the
+         * post-filtered unfiltered set: a filtered-out pair is not re-stamped and
+         * exits at `end()` through the normal sweep. State is sampled here, at
+         * collect -- set filters BEFORE the frame's `collectPairs`, not after. With
+         * no filters configured this runs the exact O1 emit (identity).
+         *
          * @param {{ bboxes: Float32Array, children: Int32Array, heights: Int32Array,
          *   userData: Int32Array, root: number, maxNodes: number }} tree
          */
@@ -346,6 +464,14 @@ export function createOverlap(options) {
             ensureStack(tree.maxNodes);
             const stack = traversalStack;
             const cap = stack.length;   // slots
+
+            // O2 filter locals, hoisted ONCE (hot-path law). When filtering was
+            // never configured, `fActive` is false and the leaf-leaf emit runs the
+            // exact O1 path -- no filter loads, byte-identical set (F2 identity).
+            const fActive = filtersActive;
+            const eState = entityState;
+            const eLen = eState.length;
+            const mtx = matrix;
 
             if (root < 0) return;       // empty tree -> zero pairs (E4).
 
@@ -408,8 +534,25 @@ export function createOverlap(options) {
                                 throw new Error(DUP_ID_MSG + a + ' and ' + b +
                                     ' share userData ' + userData[a] + '. Leaf userData must be unique.');
                             }
-                            // add() dedups and canonicalizes lo < hi (D1/E3).
-                            addPair(userData[a], userData[b]);
+                            const ua = userData[a];
+                            const ub = userData[b];
+                            // O2 FILTER (F1/F2/F4), applied HERE -- at collect,
+                            // before add. The dup-userData throw above runs FIRST:
+                            // filtering must never mask a corrupt tree (F1). A pair
+                            // that fails the filter is simply not re-stamped this
+                            // frame, so the O0 sweep exits it at end() -- no special
+                            // exit path (F4). An id beyond eLen reads the default 0
+                            // (layer 0 + enabled), the O1 identity.
+                            if (fActive) {
+                                const sa = ua < eLen ? eState[ua] : 0;
+                                const sb = ub < eLen ? eState[ub] : 0;
+                                if ((sa & DISABLED_BIT) === 0 && (sb & DISABLED_BIT) === 0 &&
+                                    ((mtx[sa & LAYER_MASK] >>> (sb & LAYER_MASK)) & 1) === 1) {
+                                    addPair(ua, ub);   // dedups, canonicalizes lo < hi (D1/E3).
+                                }
+                            } else {
+                                addPair(ua, ub);   // O1 identity: dedups, canonicalizes lo < hi.
+                            }
                         } else {
                             if (sp + 4 > cap) throw new Error(stackOverflowMsg);
                             // Descend the TALLER node (tie -> a). The taller is
@@ -459,6 +602,71 @@ export function createOverlap(options) {
         narrow(boxA, boxB) {
             return boxA[0] <= boxB[2] && boxB[0] <= boxA[2] &&
                 boxA[1] <= boxB[3] && boxB[1] <= boxA[3];
+        },
+
+        /**
+         * O2 -- assign an entity to a collision layer (decision F1). Cold config
+         * path: keyed by `userData`, so it survives bvh rotations (a refit relinks
+         * node ids, never userData -- F3). Default layer is 0; every entity starts
+         * there. On an uncapped instance the backing array grows here if needed
+         * (never on a frame path); on a capped one, `userData > maxEntityId` throws.
+         * @param {number} userData non-negative int32 entity id.
+         * @param {number} layerIndex integer in [0, 31].
+         */
+        setLayer(userData, layerIndex) {
+            checkLayer(layerIndex, 'layer');
+            reachEntity(userData, 'setLayer(userData, layer)');
+            // Preserve the disabled bit; replace only the layer bits (F1 packing).
+            entityState[userData] = (entityState[userData] & ~LAYER_MASK) | layerIndex;
+            filtersActive = true;
+        },
+
+        /**
+         * O2 -- set whether two layers interact (decision F2). Writes BOTH `(a,b)`
+         * and `(b,a)`, so the matrix is symmetric by construction -- an asymmetric
+         * rule (a pair whose appearance depends on which node the descent reached
+         * first) is unrepresentable. Default is all-pairs-enabled.
+         * @param {number} layerA integer in [0, 31].
+         * @param {number} layerB integer in [0, 31].
+         * @param {boolean} enabled true => the two layers test each other.
+         */
+        setInteract(layerA, layerB, enabled) {
+            checkLayer(layerA, 'layerA');
+            checkLayer(layerB, 'layerB');
+            if (typeof enabled !== 'boolean') {
+                throw new TypeError('lite-overlap: setInteract(a, b, enabled) requires a boolean enabled, got ' + typeof enabled + '.');
+            }
+            const bitB = 1 << layerB;
+            const bitA = 1 << layerA;
+            if (enabled) {
+                matrix[layerA] |= bitB;
+                matrix[layerB] |= bitA;
+            } else {
+                matrix[layerA] &= ~bitB;
+                matrix[layerB] &= ~bitA;
+            }
+            filtersActive = true;
+        },
+
+        /**
+         * O2 -- enable or disable an entity (decision F4). A disabled entity fails
+         * `shouldTest` unconditionally at every leaf-leaf candidate, so none of its
+         * pairs re-stamp this frame and ALL of them exit at the next `end()` via
+         * the ordinary O0 mark-sweep -- "fires exit for every live pair of that
+         * entity, exactly once" with no special-case exit path. Cheaper and clearer
+         * than removing the leaf from the tree and re-inserting it. Set it BEFORE
+         * the frame's `collectPairs`; state is sampled at collect (F4).
+         * @param {number} userData non-negative int32 entity id.
+         * @param {boolean} enabled false => generate no pairs for this entity.
+         */
+        setEnabled(userData, enabled) {
+            if (typeof enabled !== 'boolean') {
+                throw new TypeError('lite-overlap: setEnabled(userData, enabled) requires a boolean enabled, got ' + typeof enabled + '.');
+            }
+            reachEntity(userData, 'setEnabled(userData, enabled)');
+            if (enabled) entityState[userData] &= ~DISABLED_BIT;
+            else entityState[userData] |= DISABLED_BIT;
+            filtersActive = true;
         },
 
         /**

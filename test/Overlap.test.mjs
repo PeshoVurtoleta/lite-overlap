@@ -39,7 +39,7 @@ function key(a, b) {
 // =============================================================================
 
 test('VERSION is exported and in three-place sync', () => {
-    assert.equal(VERSION, '1.1.0');
+    assert.equal(VERSION, '1.2.0');
 });
 
 test('FORMAT_VERSION conformance: agrees with both peers (decision C1)', () => {
@@ -71,10 +71,10 @@ test('maxPairs must be a positive integer', () => {
     assert.throws(() => createOverlap({ maxPairs: 'x' }), RangeError);
 });
 
-test('unknown option key fails closed with a did-you-mean hint', () => {
+test('unknown option key fails closed naming the expected keys', () => {
     assert.throws(
         () => createOverlap({ maxPairs: 8, maxPair: 8 }),
-        /unknown option "maxPair".*Did you mean "maxPairs"/,
+        /unknown option "maxPair".*Expected "maxPairs" or "maxEntityId"/,
     );
 });
 

@@ -85,6 +85,17 @@ export interface CreateOverlapOptions {
      * remains usable); read `stats().highWaterMark` to size it. Positive integer.
      */
     maxPairs: number;
+
+    /**
+     * Optional cap on the entity-id space of the O2 filter arrays (`setLayer` /
+     * `setEnabled`). When given, those arrays are sized once to `maxEntityId + 1`
+     * and any `userData` above it fails closed. When omitted, they grow
+     * lazily-once on the cold config path the first time a larger id is filtered
+     * -- never on a frame path -- so `createOverlap({ maxPairs })` stays valid and
+     * a caller who never filters allocates no filter storage beyond the empty
+     * defaults. Non-negative integer.
+     */
+    maxEntityId?: number;
 }
 
 /**
@@ -162,6 +173,53 @@ export interface Overlap {
      * @returns whether the two tight boxes overlap (touching edges count).
      */
     narrow(boxA: Float32Array, boxB: Float32Array): boolean;
+
+    /**
+     * O2 -- assign an entity to a collision layer (decision F1). Keyed by
+     * `userData`, so the assignment survives bvh rotations (a refit relinks node
+     * ids but never `userData` -- decision F3). Every entity defaults to layer 0.
+     * On an uncapped instance the backing array grows here on the cold path if
+     * needed; on a `maxEntityId`-capped one, a `userData` above the cap throws.
+     *
+     * Filtering is sampled at {@link collectPairs}: call this BEFORE the frame's
+     * collect for it to take effect that frame.
+     *
+     * @param userData non-negative int32 entity id.
+     * @param layerIndex integer layer in `[0, 31]`.
+     * @throws RangeError if `userData` is not a non-negative integer, if
+     *   `layerIndex` is outside `[0, 31]`, or if `userData` exceeds `maxEntityId`.
+     */
+    setLayer(userData: number, layerIndex: number): void;
+
+    /**
+     * O2 -- set whether two layers interact (decision F2). Sets both `(a, b)` and
+     * `(b, a)`, so the 32x32 collision matrix is symmetric by construction. The
+     * default matrix is all-pairs-enabled, so an instance whose layers are never
+     * touched reports exactly the unfiltered ({@link collectPairs}) set.
+     *
+     * @param layerA integer layer in `[0, 31]`.
+     * @param layerB integer layer in `[0, 31]`.
+     * @param enabled `true` => the two layers test each other; `false` => never.
+     * @throws RangeError if either layer is outside `[0, 31]`.
+     * @throws TypeError if `enabled` is not a boolean.
+     */
+    setInteract(layerA: number, layerB: number, enabled: boolean): void;
+
+    /**
+     * O2 -- enable or disable an entity (decision F4). A disabled entity fails the
+     * layer test at every candidate, so none of its pairs re-stamp and all of its
+     * live pairs fire exit at the next {@link end} through the ordinary mark-sweep
+     * -- exactly once each, with no special exit path. Cheaper than removing the
+     * leaf from the tree and re-inserting it. Sampled at {@link collectPairs}: set
+     * it BEFORE the frame's collect.
+     *
+     * @param userData non-negative int32 entity id.
+     * @param enabled `false` => generate no pairs for this entity.
+     * @throws RangeError if `userData` is not a non-negative integer, or exceeds
+     *   `maxEntityId`.
+     * @throws TypeError if `enabled` is not a boolean.
+     */
+    setEnabled(userData: number, enabled: boolean): void;
 
     /**
      * Copy this frame's enter ids into caller buffers, mirroring bvh's

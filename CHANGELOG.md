@@ -3,6 +3,61 @@
 All notable changes to `@zakkster/lite-overlap` are documented here.
 The format follows Keep a Changelog; this package adheres to SemVer.
 
+## [1.2.0] - 2026-07-31
+
+Layers and filters. The self-traversal from 1.1.0 reported every overlapping
+pair; a real trigger system wants "player against pickups, not pickups against
+each other." This release filters **during** the descent -- strictly cheaper than
+filtering the emitted set -- keyed by `userData` so it stays correct across BVH
+rotations, and results-preserving: the filtered set equals the unfiltered set
+post-filtered in JS, always. No new runtime dependency; `FORMAT_VERSION` stays
+`1`. Design of record: `decisions/0003-filters.md`.
+
+### Added
+- **`setLayer(userData, layerIndex)`** -- assign an entity to one of 32 layers
+  (default 0). Keyed by `userData` (the stable entity id), never a node id, so
+  the assignment survives BVH rotations -- a refit relinks node ids but never
+  `userData` (decision F1).
+- **`setInteract(layerA, layerB, enabled)`** -- set whether two layers test each
+  other. Writes both `(a,b)` and `(b,a)`: the 32x32 collision matrix is symmetric
+  by construction, so an asymmetric rule (a pair whose appearance depends on which
+  node the descent reached first) is unrepresentable. Default is all-pairs-enabled,
+  so an instance whose layers are never touched reports exactly the 1.1.0 set
+  (decision F2).
+- **`setEnabled(userData, enabled)`** -- enable or disable an entity. A disabled
+  entity generates no pairs; all of its live pairs fire exit at the next `end()`,
+  exactly once, through the ordinary mark-sweep -- no special exit path, cheaper
+  than removing the leaf and re-inserting it (decision F4).
+- **`createOverlap({ maxPairs, maxEntityId? })`** -- optional `maxEntityId` caps
+  the `userData`-keyed filter arrays (fixed size, fail-closed above it). Omitted,
+  they grow lazily-once on the cold `setLayer` / `setEnabled` path -- never on a
+  frame path -- so `createOverlap({ maxPairs })` stays a valid, non-breaking call
+  and a caller who never filters allocates no filter storage.
+
+### Filtering model
+- Applied inside `collectPairs`, at each leaf-leaf candidate, **before** `add` and
+  **after** the fail-closed duplicate-`userData` corruption check -- filtering
+  never masks a corrupt tree (decision F1). The raw `add(a, b)` door stays
+  unfiltered by design (it is the primitive and the differential oracle).
+- Filter state is **sampled at collect**: set layers / enabled before the frame's
+  `collectPairs`, not after.
+- **No cached node-keyed subtree masks.** They cannot be maintained from outside
+  `@zakkster/lite-bvh` (rotations relink node ids inside `_refit` with no external
+  hook), so a cached mask would silently prune a subtree that should interact and
+  drop pairs. Rejected on that evidence (decision F3); only leaf-level,
+  `userData`-keyed filtering ships. A rotation-adversary test (monotone drift that
+  provokes rotations) pins the filtered set equal to the brute filtered oracle
+  every frame.
+
+### Guarantees held
+- Zero allocation on every frame path with filtering active: the mask test reads
+  pre-owned buffers and the setters are cold config. Proven by the torture gate
+  (`maxMajor: 0`, `maxArrayBuffersGrowth: 0`) plus a dedicated filtered-path
+  buffer-growth assertion; the `Set<string>` control still trips the gate.
+- 90 tests pass (`node --test`), including the F2 results-preserving corpus, the
+  F3 rotation adversary, the F4 exit-on-disable lifecycle, and the fail-closed
+  validation matrix.
+
 ## [1.1.0] - 2026-07-31
 
 The all-pairs self-traversal. The pair table from 1.0.0 was fed by the caller

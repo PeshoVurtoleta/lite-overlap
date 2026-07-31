@@ -7,7 +7,7 @@
 > path.** Companion to `@zakkster/lite-bvh` and `@zakkster/lite-aabb` (same
 > `FORMAT_VERSION` buffer contract; no runtime dependency, format agreement only).
 
-Version `1.1.0`. Named exports: `createOverlap`, `VERSION`, `FORMAT_VERSION`.
+Version `1.2.0`. Named exports: `createOverlap`, `VERSION`, `FORMAT_VERSION`.
 
 `FORMAT_VERSION` (integer, currently `1`) is the shared buffer-contract version.
 `@zakkster/lite-aabb` and `@zakkster/lite-bvh` export the identical constant; a
@@ -16,7 +16,8 @@ conformance test asserts all three equal. It is on a separate axis from the semv
 
 It is **not a solver.** No contact normals, no minimum translation vector, no
 impulses. It owns the layer between a spatial index and game logic: pair
-lifecycle, and (this release) all-pairs detection in one descent.
+lifecycle, all-pairs detection in one descent, and (this release) layer filtering
+that cuts cost without changing results.
 
 ## Model
 
@@ -32,8 +33,11 @@ passed to `add`.
 ```ts
 // ALLOCATES -- call at setup. maxPairs is a positive integer; every buffer is
 // sized from it. A new distinct pair past the cap throws atomically (table
-// unchanged, still usable); read stats().highWaterMark to size it.
-function createOverlap(options: { maxPairs: number }): Overlap;
+// unchanged, still usable); read stats().highWaterMark to size it. maxEntityId
+// (optional) caps the userData-keyed filter arrays: given => fixed + fail-closed
+// above it; omitted => those arrays grow lazily-once on the cold setLayer/
+// setEnabled path (never on a frame), so a caller who never filters pays nothing.
+function createOverlap(options: { maxPairs: number, maxEntityId?: number }): Overlap;
 
 interface Overlap {
     // Open a frame: flip the internal tag so every slot's stamp is now stale,
@@ -58,6 +62,24 @@ interface Overlap {
     // Close the frame: one linear table scan emits an exit for every pair present
     // last frame but not touched this frame, and removes it. O(capacity).
     end(): void;
+
+    // LAYERS / FILTERS (this release). All cold-config; filtering is applied
+    // inside collectPairs, before add, and changes COST not results (a filtered
+    // pair simply is not re-stamped and exits via end()). State is sampled at
+    // collect -- set it BEFORE the frame's collectPairs. With none of these ever
+    // called, collectPairs runs the exact unfiltered path (identity).
+
+    // Assign an entity to a layer [0,31] (default 0). Keyed by userData, so it
+    // survives BVH rotations (a refit relinks node ids, never userData).
+    setLayer(userData: number, layerIndex: number): void;
+
+    // Set whether two layers interact. Sets BOTH (a,b) and (b,a) -- the 32x32
+    // matrix is symmetric by construction. Default: all pairs enabled (identity).
+    setInteract(layerA: number, layerB: number, enabled: boolean): void;
+
+    // Enable/disable an entity. A disabled entity generates no pairs; its live
+    // pairs all fire exit at the next end(), exactly once, via the mark-sweep.
+    setEnabled(userData: number, enabled: boolean): void;
 
     // Copy this frame's enter / exit ids into caller buffers (bvh query(out)
     // convention; canonically ordered outA[k] < outB[k]). Non-destructive until
@@ -93,6 +115,20 @@ function narrow(boxA: Float32Array, boxB: Float32Array): boolean;   // [minX,min
 // leaf), heights (0 at a leaf), userData (leaf id, -1 internal), root, maxNodes.
 interface BvhTreeView { /* see Overlap.d.ts */ }
 ```
+
+## Layers / filters -- cost down, results unchanged
+
+Give entities a layer with `setLayer(id, layer)` and turn layer pairs on/off with
+`setInteract(a, b, on)` (a symmetric 32x32 matrix, all-on by default). At each
+leaf-leaf candidate `collectPairs` mask-tests the two endpoints before `add`, so
+filtered pairs are never recorded -- strictly cheaper than filtering the emitted
+set after. Filtering is **results-preserving**: the filtered set equals the
+unfiltered set post-filtered in JS, always. Because state is keyed by `userData`
+(never a node id), it stays correct across BVH rotations -- a per-node cached mask
+would silently go stale on the next refit, so this package does not keep one.
+`setEnabled(id, false)` is the special case that removes all of an entity's pairs;
+each fires exit exactly once, on the frame it is disabled, through the ordinary
+mark-sweep. Set any filter BEFORE the frame's `collectPairs`; it is sampled there.
 
 ## Fat vs tight -- the one thing to get right
 
