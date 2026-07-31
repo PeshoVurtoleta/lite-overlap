@@ -4,10 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="SWEEP // LINE, scene 01 PAIRS: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
-<title>SWEEP // LINE - 01 PAIRS - lite-overlap</title>
+<meta name="description" content="SWEEP // LINE: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Scene 01 PAIRS + scene 03 TRAVERSE, driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
+<title>SWEEP // LINE - lite-overlap</title>
 <script type="importmap">
-{ "imports": { "lite-overlap": "../Overlap.js" } }
+{ "imports": {
+    "lite-overlap": "../Overlap.js",
+    "@zakkster/lite-bvh": "../node_modules/@zakkster/lite-bvh/Bvh.js"
+} }
 </script>
 </head>
 <body>
@@ -44,6 +47,7 @@
 
         --viewport: #060a12;
         --viewport-grid: rgba(67, 180, 228, 0.06);
+        --node: #3a5175;          /* bvh internal-node outline; constant across themes (viewport is always dark) */
         --shadow: 0 1px 0 rgba(255, 255, 255, 0.02), 0 12px 34px -18px rgba(0, 0, 0, 0.8);
         --radius: 12px;
         --radius-sm: 8px;
@@ -144,10 +148,12 @@
     .stageHint {
         position: absolute; left: 14px; bottom: 12px;
         font: 400 11px/1.5 var(--mono); color: var(--text-dim);
-        pointer-events: none; max-width: 60%;
+        pointer-events: none; max-width: 66%;
     }
     .stageHint b { color: var(--enter); font-weight: 600; }
     .stageHint i { color: var(--exit); font-style: normal; font-weight: 600; }
+    .stageHint u { color: var(--warn); text-decoration: none; font-weight: 600; }
+    .stageHint s { color: var(--steady); text-decoration: none; font-weight: 600; }
 
     aside {
         background: var(--panel); border-left: 1px solid var(--line);
@@ -171,6 +177,7 @@
     .pill { font: 600 12px/1 var(--mono); padding: 5px 9px; border-radius: 999px; font-variant-numeric: tabular-nums; }
     .pill.zero { color: var(--good); background: color-mix(in oklab, var(--good) 15%, transparent); }
     .pill.hot { color: var(--bad); background: color-mix(in oklab, var(--bad) 18%, transparent); }
+    .pill.idle { color: var(--text-dim); background: color-mix(in oklab, var(--text-dim) 15%, transparent); }
     #spark { display: block; width: 100%; height: 56px; margin-top: 4px; border-radius: 6px; background: var(--viewport); }
     .sparkCap { display: flex; justify-content: space-between; font: 400 10px/1.4 var(--mono); color: var(--text-dim); margin-top: 6px; }
     .sparkCap b { color: var(--text-mut); font-weight: 600; }
@@ -189,9 +196,14 @@
     .field label b { color: var(--text); font-weight: 600; }
     input[type=range] { width: 100%; accent-color: var(--steady); cursor: pointer; }
 
+    .btnRow { display: flex; gap: 8px; margin-top: 11px; }
+    .btnRow .themeBtn { flex: 1 1 0; text-align: center; }
+    .btnRow .themeBtn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
     .note { font: 400 11px/1.5 var(--sans); color: var(--text-dim); }
     .note code { font-family: var(--mono); color: var(--text-mut); }
     .warn { color: var(--warn); }
+    [hidden] { display: none !important; }
 </style>
 
 <header>
@@ -205,160 +217,180 @@
 <div id="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="true" data-scene="01">01 &middot; PAIRS</button>
     <button class="tab" role="tab" disabled data-scene="02">02 &middot; SWEEP <small>O3</small></button>
-    <button class="tab" role="tab" disabled data-scene="03">03 &middot; TRAVERSE <small>O1</small></button>
+    <button class="tab" role="tab" aria-selected="false" data-scene="03">03 &middot; TRAVERSE</button>
     <button class="tab" role="tab" disabled data-scene="04">04 &middot; MASKS <small>O2</small></button>
 </div>
 
 <main>
     <div class="stage">
         <canvas id="view"></canvas>
-        <div class="stageHint">
+        <div class="stageHint" id="hint01">
             drifting boxes &middot; a line is drawn while two overlap.
             <b>mint flash</b> = just started &middot; <i>rose fade</i> = just stopped.
+        </div>
+        <div class="stageHint" id="hint03" hidden>
+            BVH as nested boxes &middot; play or step the descent.
+            <u>amber</u> = node vs itself &middot; <s>cyan</s> = descend &middot;
+            <b>mint</b> = leaf pair found &middot; <i>rose</i> = pruned.
         </div>
     </div>
 
     <aside>
-        <div class="card">
-            <h2>lifecycle</h2>
-            <div class="grid">
-                <div class="stat"><div class="k">pairs (live)</div><div class="v accent" id="sPairs">0</div></div>
-                <div class="stat"><div class="k">stay</div><div class="v" id="sStay">0</div></div>
-                <div class="stat"><div class="k">enter / s</div><div class="v enter" id="sEnter">0</div></div>
-                <div class="stat"><div class="k">exit / s</div><div class="v exit" id="sExit">0</div></div>
+        <!-- ================= scene 01 PAIRS ================= -->
+        <div id="aside01">
+            <div class="card">
+                <h2>lifecycle</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">pairs (live)</div><div class="v accent" id="sPairs">0</div></div>
+                    <div class="stat"><div class="k">stay</div><div class="v" id="sStay">0</div></div>
+                    <div class="stat"><div class="k">enter / s</div><div class="v enter" id="sEnter">0</div></div>
+                    <div class="stat"><div class="k">exit / s</div><div class="v exit" id="sExit">0</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">GC EVENTS</span>
+                    <span class="pill zero" id="sGc">0</span>
+                </div>
+                <canvas id="spark"></canvas>
+                <div class="sparkCap">
+                    <span>JS heap <b id="sHeapMode">-</b></span>
+                    <span><b id="sHeap">-</b></span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>the pair store</h2>
+                <label class="toggle">
+                    <input type="checkbox" id="ctrlToggle">
+                    <span class="track"></span>
+                    <span class="lbl">Set&lt;string&gt;<span>swap the zero-GC table for the naive store</span></span>
+                </label>
+                <div class="note" id="ctrlNote" style="margin-top:11px">
+                    store: <code id="sStore">lite-overlap</code> &middot; alloc/frame <b id="sGarbage">0 B</b>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>scene</h2>
+                <div class="field">
+                    <label>entities <b id="sN">1200</b></label>
+                    <input type="range" id="nSlider" min="100" max="5000" step="100" value="1200">
+                </div>
+                <div class="field">
+                    <label>drift speed <b id="sSpeed">1.0&times;</b></label>
+                    <input type="range" id="speedSlider" min="0" max="30" step="1" value="10">
+                </div>
+                <div class="note" style="margin-top:10px">
+                    table cap <code id="sCap">-</code> pairs.
+                    <span id="sCapWarn" class="warn" hidden>&middot; cap reached &mdash; lower entities.</span>
+                </div>
+            </div>
+
+            <div class="note">
+                Every counter is checkable headlessly: this drives the real
+                <code>createOverlap()</code> at <b>0&nbsp;B/frame</b>. Flip the toggle and
+                the heap grows teeth &mdash; the GC counter is the gate, on stage.
             </div>
         </div>
 
-        <div class="card">
-            <div class="gcRow">
-                <span class="k">GC EVENTS</span>
-                <span class="pill zero" id="sGc">0</span>
+        <!-- ================= scene 03 TRAVERSE ================= -->
+        <div id="aside03" hidden>
+            <div class="card">
+                <h2>traverse &mdash; one descent</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">node pairs tested</div><div class="v accent" id="tTested">0</div></div>
+                    <div class="stat"><div class="k">pairs found</div><div class="v enter" id="tFound">0</div></div>
+                    <div class="stat"><div class="k">stack depth</div><div class="v" id="tDepth">0</div></div>
+                    <div class="stat"><div class="k">stack high-water</div><div class="v" id="tHw">0<small id="tCap"> / -</small></div></div>
+                </div>
             </div>
-            <canvas id="spark"></canvas>
-            <div class="sparkCap">
-                <span>JS heap <b id="sHeapMode">-</b></span>
-                <span><b id="sHeap">-</b></span>
-            </div>
-        </div>
 
-        <div class="card">
-            <h2>the pair store</h2>
-            <label class="toggle">
-                <input type="checkbox" id="ctrlToggle">
-                <span class="track"></span>
-                <span class="lbl">Set&lt;string&gt;<span>swap the zero-GC table for the naive store</span></span>
-            </label>
-            <div class="note" id="ctrlNote" style="margin-top:11px">
-                store: <code id="sStore">lite-overlap</code> &middot; alloc/frame <b id="sGarbage">0 B</b>
+            <div class="card">
+                <h2>N-query &mdash; the same frame</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">directed reports</div><div class="v exit" id="tDirected">0</div></div>
+                    <div class="stat"><div class="k">real pairs</div><div class="v" id="tNqPairs">0</div></div>
+                </div>
+                <div class="note" style="margin-top:10px">
+                    every pair found <b style="color:var(--exit)">twice</b> (<code id="tDup">2&times;</code>),
+                    plus a query box rebuilt per entity.
+                </div>
             </div>
-        </div>
 
-        <div class="card">
-            <h2>scene</h2>
-            <div class="field">
-                <label>entities <b id="sN">1200</b></label>
-                <input type="range" id="nSlider" min="100" max="5000" step="100" value="1200">
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">TRAVERSE vs N-QUERY</span>
+                    <span class="pill idle" id="tMsPill">-</span>
+                </div>
+                <div class="note">
+                    <code id="tTravMs">-</code> traverse &middot; <code id="tNqMs">-</code> N-query,
+                    per full sweep. Micro-scale &mdash; drag <b>entities</b> to find the crossover.
+                    The rigorous bench (right-sized tables) has collect winning
+                    <b>1.5&times;</b> at N=100 up to <b>4.4&times;</b> at N=20000 &mdash; <code>bench/RESULTS.md</code>.
+                </div>
             </div>
-            <div class="field">
-                <label>drift speed <b id="sSpeed">1.0&times;</b></label>
-                <input type="range" id="speedSlider" min="0" max="30" step="1" value="10">
-            </div>
-            <div class="note" style="margin-top:10px">
-                table cap <code id="sCap">-</code> pairs.
-                <span id="sCapWarn" class="warn" hidden>&middot; cap reached &mdash; lower entities.</span>
-            </div>
-        </div>
 
-        <div class="note">
-            Every counter is checkable headlessly: this drives the real
-            <code>createOverlap()</code> at <b>0&nbsp;B/frame</b>. Flip the toggle and
-            the heap grows teeth &mdash; the GC counter is the gate, on stage.
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">VERIFIED vs LIBRARY</span>
+                    <span class="pill idle" id="tVerPill">-</span>
+                </div>
+                <div class="note">
+                    animated <code id="tAnim">0</code> = library <code id="tLib">0</code>
+                    = brute <code id="tBrute">0</code>. The demo checks the library, it does not echo it.
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>scene</h2>
+                <div class="field">
+                    <label>entities <b id="tNOut">72</b></label>
+                    <input type="range" id="tNSlider" min="6" max="96" step="1" value="72">
+                </div>
+                <div class="field">
+                    <label>speed <b id="tSpeedOut">6 / frame</b></label>
+                    <input type="range" id="tSpeedSlider" min="0" max="30" step="1" value="6">
+                </div>
+                <div class="btnRow">
+                    <button class="themeBtn" id="tStepBtn" type="button">step</button>
+                    <button class="themeBtn" id="tReplayBtn" type="button">replay</button>
+                </div>
+                <div class="note" style="margin-top:10px" id="tStatus">traversing...</div>
+            </div>
         </div>
     </aside>
 </main>
 
 <script type="module">
 import { createOverlap, VERSION, FORMAT_VERSION } from 'lite-overlap';
+import { DynamicBVH2D } from '@zakkster/lite-bvh';
 
-/* ---- cached refs ($-prefixed, resolved once) --------------------------- */
+/* =======================================================================
+   SHARED SHELL -- owns the viewport canvas, colors, sizing, and the single
+   rAF loop. Scenes are objects {id, enter, exit, frame, onResize}; switching
+   toggles DOM visibility only and allocates nothing (teardown-flat by design).
+   ======================================================================= */
 const $view = document.getElementById('view');
-const $spark = document.getElementById('spark');
-const $pairs = document.getElementById('sPairs');
-const $stay = document.getElementById('sStay');
-const $enter = document.getElementById('sEnter');
-const $exit = document.getElementById('sExit');
-const $gc = document.getElementById('sGc');
-const $heap = document.getElementById('sHeap');
-const $heapMode = document.getElementById('sHeapMode');
-const $store = document.getElementById('sStore');
-const $garbage = document.getElementById('sGarbage');
-const $nOut = document.getElementById('sN');
-const $speedOut = document.getElementById('sSpeed');
-const $cap = document.getElementById('sCap');
-const $capWarn = document.getElementById('sCapWarn');
-const $nSlider = document.getElementById('nSlider');
-const $speedSlider = document.getElementById('speedSlider');
-const $ctrl = document.getElementById('ctrlToggle');
-const $themeBtn = document.getElementById('themeBtn');
-
+const vctx = $view.getContext('2d');
 document.getElementById('verV').textContent = VERSION;
 document.getElementById('fmtV').textContent = FORMAT_VERSION;
 
-const vctx = $view.getContext('2d');
-const sctx = $spark.getContext('2d');
+let W = 0, H = 0, DPR = 1;
 
-/* ---- fixed-capacity buffers, allocated ONCE ---------------------------- */
-const MAX_N = 5000;
-const MAX_PAIRS = 1 << 16;            // 65536 -- comfortably above demo density
-const EFX = 1 << 12;                  // 4096 effect slots, pow-2 ring
-const EFX_MASK = EFX - 1;
-const SPARK_N = 1 << 8;               // 256 heap samples, pow-2 ring
-const SPARK_MASK = SPARK_N - 1;
-const EFX_TTL = 26;                   // frames a flash/fade lives
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+let COL = {};
+function reloadColors() {
+    // Read every CSS custom property ONCE here (cold path); the frame loops read
+    // the cached COL object, never getComputedStyle.
+    COL = {
+        steady: css('--steady'), enter: css('--enter'), exit: css('--exit'),
+        text: css('--text-dim'), good: css('--good'), bad: css('--bad'),
+        warn: css('--warn'), grid: css('--viewport-grid'), node: css('--node'),
+    };
+}
 
-const posX = new Float64Array(MAX_N), posY = new Float64Array(MAX_N);
-const velX = new Float64Array(MAX_N), velY = new Float64Array(MAX_N);
-const order = new Int32Array(MAX_N);  // box indices sorted by left edge (persistent)
-
-// current overlapping pairs this frame (the sweep result = live set to draw)
-const curA = new Int32Array(MAX_PAIRS), curB = new Int32Array(MAX_PAIRS);
-// enter/exit delta drain buffers
-const evA = new Int32Array(MAX_PAIRS), evB = new Int32Array(MAX_PAIRS);
-// effect ring: a box-pair + birth frame + kind (0 enter / 1 exit)
-const efxA = new Int32Array(EFX), efxB = new Int32Array(EFX);
-const efxBorn = new Float64Array(EFX), efxKind = new Int32Array(EFX);
-let efxHead = 0;
-// heap sample ring
-const sparkBuf = new Float64Array(SPARK_N);
-let sparkCount = 0;
-
-const overlap = createOverlap({ maxPairs: MAX_PAIRS });
-
-/* ---- control: the naive Set<string> pair store (allocates by design) --- */
-let ctrlPrev = new Set();
-
-/* ---- sim state --------------------------------------------------------- */
-let N = 1200;
-let half = 6;
-let speed = 1.0;
-let useControl = false;
-let frame = 0;
-let capped = false;
-let curCount = 0;             // overlapping pairs found by this frame's sweep
-let liveCount = 0, stayCount = 0;
-
-// telemetry accumulators (rate = count since last publish / interval)
-let accEnter = 0, accExit = 0, lastPublishFrame = 0, lastPublishT = 0;
-let gcEvents = 0;
-
-const heapSupported = !!(typeof performance !== 'undefined' && performance.memory);
-let lastHeap = heapSupported ? performance.memory.usedJSHeapSize : 0;
-$heapMode.textContent = heapSupported ? '(Chrome)' : '(unavailable)';
-$cap.textContent = overlap.stats().capacity;   // initial UI from a peek
-
-/* ---- viewport sizing (HiDPI) ------------------------------------------- */
-let W = 0, H = 0, DPR = 1, seeded = false;
-let sparkW = 1;                       // cached spark CSS width (read in resize, not per draw)
 function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     const r = $view.getBoundingClientRect();
@@ -366,249 +398,724 @@ function resize() {
     H = Math.max(1, Math.floor(r.height));
     $view.width = W * DPR; $view.height = H * DPR;
     vctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const sr = $spark.getBoundingClientRect();
-    sparkW = Math.max(1, Math.floor(sr.width));   // cache: layout read ONCE here, never in drawSpark
-    $spark.width = sparkW * DPR;
-    $spark.height = 56 * DPR;
-    sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    // Seed only once the stage has a real size (module scripts are deferred but
-    // layout may still be settling on first run -- observed W=32 H=1 at boot).
-    if (!seeded && W >= 64 && H >= 64) { reseed(); seeded = true; }
+    if (active && active.onResize) active.onResize();
 }
 window.addEventListener('resize', resize);
-// Catch the layout-settling transition that a boot-time getBoundingClientRect
-// misses; also handles container resizes.
 if (typeof ResizeObserver !== 'undefined') new ResizeObserver(resize).observe($view.parentElement);
 
-/* ---- deterministic seeding -------------------------------------------- */
-let seed = 0x9e3779b9 >>> 0;
-function rnd() { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; }
+const scenes = {};
+let active = null;
+const tabEls = document.querySelectorAll('.tab');
 
-function spawn(i) {
-    posX[i] = rnd() * Math.max(1, W);
-    posY[i] = rnd() * Math.max(1, H);
-    const a = rnd() * Math.PI * 2, s = 0.4 + rnd() * 0.8;
-    velX[i] = Math.cos(a) * s; velY[i] = Math.sin(a) * s;
+function activate(id) {
+    const next = scenes[id];
+    if (!next || next === active) return;
+    if (active && active.exit) active.exit();
+    active = next;
+    for (const t of tabEls) t.setAttribute('aria-selected', t.dataset.scene === id ? 'true' : 'false');
+    if (active.enter) active.enter();
+    if (active.onResize) active.onResize();
 }
-function reseed() {
-    seed = 0x9e3779b9 >>> 0;
-    for (let i = 0; i < MAX_N; i++) { spawn(i); order[i] = i; }
-}
-
-function boxHalfFor(n) { return Math.max(3, Math.round(10 - n / 650)); }
-
-/* ---- per-frame simulation (zero allocation) ---------------------------- */
-function step() {
-    frame++;
-    half = boxHalfFor(N);
-    const w = W, h = H, sp = speed;
-
-    // integrate + wall bounce
-    for (let i = 0; i < N; i++) {
-        let x = posX[i] + velX[i] * sp;
-        let y = posY[i] + velY[i] * sp;
-        if (x < half) { x = half; velX[i] = -velX[i]; } else if (x > w - half) { x = w - half; velX[i] = -velX[i]; }
-        if (y < half) { y = half; velY[i] = -velY[i]; } else if (y > h - half) { y = h - half; velY[i] = -velY[i]; }
-        posX[i] = x; posY[i] = y;
-    }
-
-    // insertion sort `order` by left edge -- near-linear under temporal coherence
-    for (let a = 1; a < N; a++) {
-        const idx = order[a];
-        const key = posX[idx];
-        let b = a - 1;
-        while (b >= 0 && posX[order[b]] > key) { order[b + 1] = order[b]; b--; }
-        order[b + 1] = idx;
-    }
-
-    // sweep-and-prune on x, collect current overlapping pairs
-    let cur = 0;
-    const span = half * 2;
-    capped = false;
-    for (let a = 0; a < N; a++) {
-        const ia = order[a];
-        const axr = posX[ia] + half, ay = posY[ia];
-        for (let b = a + 1; b < N; b++) {
-            const ib = order[b];
-            if (posX[ib] - half > axr) break;          // no more x-overlap possible
-            if (Math.abs(posY[ib] - ay) <= span) {      // y-overlap (boxes same size)
-                if (cur < MAX_PAIRS) { curA[cur] = ia; curB[cur] = ib; cur++; }
-                else { capped = true; }
-            }
-        }
-    }
-    curCount = cur;             // published to the renderer, zero allocation
-
-    // feed the store, harvest the enter/exit delta
-    let enters = 0, exits = 0;
-    if (!useControl) {
-        overlap.begin();
-        for (let k = 0; k < cur; k++) overlap.add(curA[k], curB[k]);
-        overlap.end();
-        enters = overlap.drainEnter(evA, evB);
-        for (let k = 0; k < enters; k++) pushEfx(evA[k], evB[k], 0);
-        exits = overlap.drainExit(evA, evB);
-        for (let k = 0; k < exits; k++) pushEfx(evA[k], evB[k], 1);
-        liveCount = overlap.pairCount();
-        stayCount = overlap.stayCount();
-    } else {
-        // naive Set<string>: fresh set + a key string per pair, diffed. GARBAGE.
-        const set = new Set();
-        for (let k = 0; k < cur; k++) {
-            const a = curA[k], b = curB[k];
-            set.add(a < b ? a + ',' + b : b + ',' + a);
-        }
-        for (const key of set) if (!ctrlPrev.has(key)) { enters++; splitPush(key, 0); }
-        for (const key of ctrlPrev) if (!set.has(key)) { exits++; splitPush(key, 1); }
-        ctrlPrev = set;
-        liveCount = set.size;
-        stayCount = liveCount - enters;
-    }
-    accEnter += enters; accExit += exits;
-
-    // heap sample + GC detection (a downward step == a collection happened)
-    if (heapSupported) {
-        const u = performance.memory.usedJSHeapSize;
-        if (u < lastHeap - 4096) gcEvents++;
-        lastHeap = u;
-        sparkBuf[sparkCount & SPARK_MASK] = u; sparkCount++;
-    }
+for (const t of tabEls) {
+    t.addEventListener('click', () => { if (!t.disabled) activate(t.dataset.scene); });
 }
 
-function pushEfx(a, b, kind) {
-    const s = efxHead & EFX_MASK;
-    efxA[s] = a; efxB[s] = b; efxBorn[s] = frame; efxKind[s] = kind; efxHead++;
-}
-// control path only: parse "a,b" back to indices for the effect (cold-ish, control is the garbage path anyway)
-function splitPush(key, kind) {
-    const c = key.indexOf(',');
-    pushEfx(+key.slice(0, c), +key.slice(c + 1), kind);
-}
-
-/* ---- rendering --------------------------------------------------------- */
-function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
-let COL = {};
-function reloadColors() {
-    COL = { steady: css('--steady'), enter: css('--enter'), exit: css('--exit'), text: css('--text-dim'), good: css('--good'), bad: css('--bad'), grid: css('--viewport-grid') };
-}
-
-function draw() {
-    vctx.clearRect(0, 0, W, H);
-
-    // phosphor grid
-    vctx.strokeStyle = COL.grid; vctx.lineWidth = 1;
-    const g = 40;
-    vctx.beginPath();
-    for (let x = g; x < W; x += g) { vctx.moveTo(x, 0); vctx.lineTo(x, H); }
-    for (let y = g; y < H; y += g) { vctx.moveTo(0, y); vctx.lineTo(W, y); }
-    vctx.stroke();
-
-    // steady lines: every currently overlapping pair
-    vctx.strokeStyle = COL.steady; vctx.globalAlpha = 0.30; vctx.lineWidth = 1;
-    vctx.beginPath();
-    for (let k = 0; k < curCount; k++) {
-        const a = curA[k], b = curB[k];
-        vctx.moveTo(posX[a], posY[a]); vctx.lineTo(posX[b], posY[b]);
-    }
-    vctx.stroke();
-    vctx.globalAlpha = 1;
-
-    // enter flashes (mint) + exit fades (rose), decaying over EFX_TTL
-    for (let s = 0; s < EFX; s++) {
-        const age = frame - efxBorn[s];
-        if (age < 0 || age > EFX_TTL) continue;
-        const t = 1 - age / EFX_TTL;
-        const a = efxA[s], b = efxB[s];
-        vctx.globalAlpha = t;
-        vctx.strokeStyle = efxKind[s] === 0 ? COL.enter : COL.exit;
-        vctx.lineWidth = efxKind[s] === 0 ? 1 + 2 * t : 1 + 1.5 * t;
-        vctx.beginPath(); vctx.moveTo(posX[a], posY[a]); vctx.lineTo(posX[b], posY[b]); vctx.stroke();
-        if (efxKind[s] === 0) { // enter: a node pulse
-            vctx.fillStyle = COL.enter;
-            vctx.beginPath(); vctx.arc(posX[a], posY[a], 1 + 2.4 * t, 0, 6.2832); vctx.fill();
-            vctx.beginPath(); vctx.arc(posX[b], posY[b], 1 + 2.4 * t, 0, 6.2832); vctx.fill();
-        }
-    }
-    vctx.globalAlpha = 1;
-
-    // boxes
-    vctx.fillStyle = COL.steady; vctx.globalAlpha = 0.55;
-    const sz = Math.max(2, half);
-    for (let i = 0; i < N; i++) vctx.fillRect(posX[i] - sz * 0.5, posY[i] - sz * 0.5, sz, sz);
-    vctx.globalAlpha = 1;
-}
-
-function drawSpark() {
-    const w = sparkW, h = 56;
-    sctx.clearRect(0, 0, w, h);
-    if (!heapSupported || sparkCount < 2) {
-        sctx.fillStyle = COL.text; sctx.font = '10px ' + '"SF Mono", monospace';
-        sctx.fillText(heapSupported ? 'sampling...' : 'heap telemetry needs Chrome', 8, 32);
-        return;
-    }
-    const n = Math.min(sparkCount, SPARK_N);
-    let mn = Infinity, mx = -Infinity;
-    for (let k = 0; k < n; k++) { const v = sparkBuf[k]; if (v < mn) mn = v; if (v > mx) mx = v; }
-    const rng = Math.max(1, mx - mn);
-    sctx.strokeStyle = useControl ? COL.bad : COL.good;
-    sctx.lineWidth = 1.5; sctx.beginPath();
-    const start = sparkCount > SPARK_N ? sparkCount - SPARK_N : 0;
-    for (let k = 0; k < n; k++) {
-        const v = sparkBuf[(start + k) & SPARK_MASK];
-        const x = (k / (n - 1)) * w;
-        const y = h - 4 - ((v - mn) / rng) * (h - 8);
-        if (k === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
-    }
-    sctx.stroke();
-}
-
-/* ---- telemetry publish (throttled ~7.5 Hz; toFixed only here) ---------- */
-function publish(now) {
-    $pairs.textContent = liveCount;
-    $stay.textContent = stayCount;
-    const dt = (now - lastPublishT) / 1000 || 1;
-    $enter.textContent = Math.round(accEnter / dt);
-    $exit.textContent = Math.round(accExit / dt);
-    accEnter = 0; accExit = 0; lastPublishT = now;
-
-    $gc.textContent = gcEvents;
-    $gc.className = 'pill ' + (gcEvents === 0 ? 'zero' : 'hot');
-    if (heapSupported) $heap.textContent = (lastHeap / 1048576).toFixed(1) + ' MB';
-
-    if (useControl) {
-        // honest per-frame garbage estimate for the naive store: a Set entry +
-        // a ~2-byte-per-char key string (~9 chars) per live pair.
-        const bytes = liveCount * 56;
-        $garbage.textContent = bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B';
-    } else {
-        $garbage.textContent = '0 B';
-    }
-    $capWarn.hidden = !capped;
-}
-
-/* ---- main loop --------------------------------------------------------- */
 function loop(now) {
-    if (!seeded) { requestAnimationFrame(loop); return; }   // idle until stage has a size
-    step();
-    draw();
-    drawSpark();
-    if ((frame & 7) === 0) publish(now);
+    if (active && active.frame) active.frame(now);
     requestAnimationFrame(loop);
 }
 
-/* ---- controls ---------------------------------------------------------- */
-$nSlider.addEventListener('input', () => { N = +$nSlider.value; $nOut.textContent = N; });
-$speedSlider.addEventListener('input', () => { speed = +$speedSlider.value / 10; $speedOut.textContent = speed.toFixed(1) + '×'; });
-$ctrl.addEventListener('change', () => {
-    useControl = $ctrl.checked;
-    $store.textContent = useControl ? 'Set<string>' : 'lite-overlap';
-    // reset stores + effects so the switch is clean
-    overlap.clear();
-    ctrlPrev = new Set();
-    gcEvents = 0; sparkCount = 0;
+/* =======================================================================
+   SCENE 01 -- PAIRS  (the O0 money shot; logic unchanged, wrapped in a
+   closure so its state and buffers are private and switch-safe)
+   ======================================================================= */
+const Scene01 = (() => {
+    const $spark = document.getElementById('spark');
+    const sctx = $spark.getContext('2d');
+    const $aside = document.getElementById('aside01');
+    const $hint = document.getElementById('hint01');
+
+    const $pairs = document.getElementById('sPairs');
+    const $stay = document.getElementById('sStay');
+    const $enter = document.getElementById('sEnter');
+    const $exit = document.getElementById('sExit');
+    const $gc = document.getElementById('sGc');
+    const $heap = document.getElementById('sHeap');
+    const $heapMode = document.getElementById('sHeapMode');
+    const $store = document.getElementById('sStore');
+    const $garbage = document.getElementById('sGarbage');
+    const $nOut = document.getElementById('sN');
+    const $speedOut = document.getElementById('sSpeed');
+    const $cap = document.getElementById('sCap');
+    const $capWarn = document.getElementById('sCapWarn');
+    const $nSlider = document.getElementById('nSlider');
+    const $speedSlider = document.getElementById('speedSlider');
+    const $ctrl = document.getElementById('ctrlToggle');
+
+    /* ---- fixed-capacity buffers, allocated ONCE ------------------------ */
+    const MAX_N = 5000;
+    const MAX_PAIRS = 1 << 16;            // 65536 -- comfortably above demo density
+    const EFX = 1 << 12;                  // 4096 effect slots, pow-2 ring
+    const EFX_MASK = EFX - 1;
+    const SPARK_N = 1 << 8;               // 256 heap samples, pow-2 ring
+    const SPARK_MASK = SPARK_N - 1;
+    const EFX_TTL = 26;                   // frames a flash/fade lives
+
+    const posX = new Float64Array(MAX_N), posY = new Float64Array(MAX_N);
+    const velX = new Float64Array(MAX_N), velY = new Float64Array(MAX_N);
+    const order = new Int32Array(MAX_N);  // box indices sorted by left edge (persistent)
+
+    const curA = new Int32Array(MAX_PAIRS), curB = new Int32Array(MAX_PAIRS);
+    const evA = new Int32Array(MAX_PAIRS), evB = new Int32Array(MAX_PAIRS);
+    const efxA = new Int32Array(EFX), efxB = new Int32Array(EFX);
+    const efxBorn = new Float64Array(EFX), efxKind = new Int32Array(EFX);
+    let efxHead = 0;
+    const sparkBuf = new Float64Array(SPARK_N);
+    let sparkCount = 0;
+
+    const overlap = createOverlap({ maxPairs: MAX_PAIRS });
+    let ctrlPrev = new Set();
+
+    let N = 1200;
+    let half = 6;
+    let speed = 1.0;
+    let useControl = false;
+    let frame = 0;
+    let capped = false;
+    let curCount = 0;
+    let liveCount = 0, stayCount = 0;
+
+    let accEnter = 0, accExit = 0, lastPublishT = 0;
+    let gcEvents = 0;
+
+    const heapSupported = !!(typeof performance !== 'undefined' && performance.memory);
+    let lastHeap = heapSupported ? performance.memory.usedJSHeapSize : 0;
+    $heapMode.textContent = heapSupported ? '(Chrome)' : '(unavailable)';
+    $cap.textContent = overlap.stats().capacity;
+
+    let seeded = false;
+    let sparkW = 1;                       // cached spark CSS width (read in onResize, not per draw)
+
+    /* ---- deterministic seeding ---------------------------------------- */
+    let seed = 0x9e3779b9 >>> 0;
+    function rnd() { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; }
+    function spawn(i) {
+        posX[i] = rnd() * Math.max(1, W);
+        posY[i] = rnd() * Math.max(1, H);
+        const a = rnd() * Math.PI * 2, s = 0.4 + rnd() * 0.8;
+        velX[i] = Math.cos(a) * s; velY[i] = Math.sin(a) * s;
+    }
+    function reseed() {
+        seed = 0x9e3779b9 >>> 0;
+        for (let i = 0; i < MAX_N; i++) { spawn(i); order[i] = i; }
+    }
+    function boxHalfFor(n) { return Math.max(3, Math.round(10 - n / 650)); }
+
+    /* ---- per-frame simulation (zero allocation) ----------------------- */
+    function step() {
+        frame++;
+        half = boxHalfFor(N);
+        const w = W, h = H, sp = speed;
+
+        for (let i = 0; i < N; i++) {
+            let x = posX[i] + velX[i] * sp;
+            let y = posY[i] + velY[i] * sp;
+            if (x < half) { x = half; velX[i] = -velX[i]; } else if (x > w - half) { x = w - half; velX[i] = -velX[i]; }
+            if (y < half) { y = half; velY[i] = -velY[i]; } else if (y > h - half) { y = h - half; velY[i] = -velY[i]; }
+            posX[i] = x; posY[i] = y;
+        }
+
+        for (let a = 1; a < N; a++) {
+            const idx = order[a];
+            const key = posX[idx];
+            let b = a - 1;
+            while (b >= 0 && posX[order[b]] > key) { order[b + 1] = order[b]; b--; }
+            order[b + 1] = idx;
+        }
+
+        let cur = 0;
+        const span = half * 2;
+        capped = false;
+        for (let a = 0; a < N; a++) {
+            const ia = order[a];
+            const axr = posX[ia] + half, ay = posY[ia];
+            for (let b = a + 1; b < N; b++) {
+                const ib = order[b];
+                if (posX[ib] - half > axr) break;
+                if (Math.abs(posY[ib] - ay) <= span) {
+                    if (cur < MAX_PAIRS) { curA[cur] = ia; curB[cur] = ib; cur++; }
+                    else { capped = true; }
+                }
+            }
+        }
+        curCount = cur;
+
+        let enters = 0, exits = 0;
+        if (!useControl) {
+            overlap.begin();
+            for (let k = 0; k < cur; k++) overlap.add(curA[k], curB[k]);
+            overlap.end();
+            enters = overlap.drainEnter(evA, evB);
+            for (let k = 0; k < enters; k++) pushEfx(evA[k], evB[k], 0);
+            exits = overlap.drainExit(evA, evB);
+            for (let k = 0; k < exits; k++) pushEfx(evA[k], evB[k], 1);
+            liveCount = overlap.pairCount();
+            stayCount = overlap.stayCount();
+        } else {
+            const set = new Set();
+            for (let k = 0; k < cur; k++) {
+                const a = curA[k], b = curB[k];
+                set.add(a < b ? a + ',' + b : b + ',' + a);
+            }
+            for (const key of set) if (!ctrlPrev.has(key)) { enters++; splitPush(key, 0); }
+            for (const key of ctrlPrev) if (!set.has(key)) { exits++; splitPush(key, 1); }
+            ctrlPrev = set;
+            liveCount = set.size;
+            stayCount = liveCount - enters;
+        }
+        accEnter += enters; accExit += exits;
+
+        if (heapSupported) {
+            const u = performance.memory.usedJSHeapSize;
+            if (u < lastHeap - 4096) gcEvents++;
+            lastHeap = u;
+            sparkBuf[sparkCount & SPARK_MASK] = u; sparkCount++;
+        }
+    }
+
+    function pushEfx(a, b, kind) {
+        const s = efxHead & EFX_MASK;
+        efxA[s] = a; efxB[s] = b; efxBorn[s] = frame; efxKind[s] = kind; efxHead++;
+    }
+    function splitPush(key, kind) {
+        const c = key.indexOf(',');
+        pushEfx(+key.slice(0, c), +key.slice(c + 1), kind);
+    }
+
+    function draw() {
+        vctx.clearRect(0, 0, W, H);
+
+        vctx.strokeStyle = COL.grid; vctx.lineWidth = 1;
+        const g = 40;
+        vctx.beginPath();
+        for (let x = g; x < W; x += g) { vctx.moveTo(x, 0); vctx.lineTo(x, H); }
+        for (let y = g; y < H; y += g) { vctx.moveTo(0, y); vctx.lineTo(W, y); }
+        vctx.stroke();
+
+        vctx.strokeStyle = COL.steady; vctx.globalAlpha = 0.30; vctx.lineWidth = 1;
+        vctx.beginPath();
+        for (let k = 0; k < curCount; k++) {
+            const a = curA[k], b = curB[k];
+            vctx.moveTo(posX[a], posY[a]); vctx.lineTo(posX[b], posY[b]);
+        }
+        vctx.stroke();
+        vctx.globalAlpha = 1;
+
+        for (let s = 0; s < EFX; s++) {
+            const age = frame - efxBorn[s];
+            if (age < 0 || age > EFX_TTL) continue;
+            const t = 1 - age / EFX_TTL;
+            const a = efxA[s], b = efxB[s];
+            vctx.globalAlpha = t;
+            vctx.strokeStyle = efxKind[s] === 0 ? COL.enter : COL.exit;
+            vctx.lineWidth = efxKind[s] === 0 ? 1 + 2 * t : 1 + 1.5 * t;
+            vctx.beginPath(); vctx.moveTo(posX[a], posY[a]); vctx.lineTo(posX[b], posY[b]); vctx.stroke();
+            if (efxKind[s] === 0) {
+                vctx.fillStyle = COL.enter;
+                vctx.beginPath(); vctx.arc(posX[a], posY[a], 1 + 2.4 * t, 0, 6.2832); vctx.fill();
+                vctx.beginPath(); vctx.arc(posX[b], posY[b], 1 + 2.4 * t, 0, 6.2832); vctx.fill();
+            }
+        }
+        vctx.globalAlpha = 1;
+
+        vctx.fillStyle = COL.steady; vctx.globalAlpha = 0.55;
+        const sz = Math.max(2, half);
+        for (let i = 0; i < N; i++) vctx.fillRect(posX[i] - sz * 0.5, posY[i] - sz * 0.5, sz, sz);
+        vctx.globalAlpha = 1;
+    }
+
+    function drawSpark() {
+        const w = sparkW, h = 56;
+        sctx.clearRect(0, 0, w, h);
+        if (!heapSupported || sparkCount < 2) {
+            sctx.fillStyle = COL.text; sctx.font = '10px ' + '"SF Mono", monospace';
+            sctx.fillText(heapSupported ? 'sampling...' : 'heap telemetry needs Chrome', 8, 32);
+            return;
+        }
+        const n = Math.min(sparkCount, SPARK_N);
+        let mn = Infinity, mx = -Infinity;
+        for (let k = 0; k < n; k++) { const v = sparkBuf[k]; if (v < mn) mn = v; if (v > mx) mx = v; }
+        const rng = Math.max(1, mx - mn);
+        sctx.strokeStyle = useControl ? COL.bad : COL.good;
+        sctx.lineWidth = 1.5; sctx.beginPath();
+        const start = sparkCount > SPARK_N ? sparkCount - SPARK_N : 0;
+        for (let k = 0; k < n; k++) {
+            const v = sparkBuf[(start + k) & SPARK_MASK];
+            const x = (k / (n - 1)) * w;
+            const y = h - 4 - ((v - mn) / rng) * (h - 8);
+            if (k === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
+        }
+        sctx.stroke();
+    }
+
+    function publish(now) {
+        $pairs.textContent = liveCount;
+        $stay.textContent = stayCount;
+        const dt = (now - lastPublishT) / 1000 || 1;
+        $enter.textContent = Math.round(accEnter / dt);
+        $exit.textContent = Math.round(accExit / dt);
+        accEnter = 0; accExit = 0; lastPublishT = now;
+
+        $gc.textContent = gcEvents;
+        $gc.className = 'pill ' + (gcEvents === 0 ? 'zero' : 'hot');
+        if (heapSupported) $heap.textContent = (lastHeap / 1048576).toFixed(1) + ' MB';
+
+        if (useControl) {
+            const bytes = liveCount * 56;
+            $garbage.textContent = bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B';
+        } else {
+            $garbage.textContent = '0 B';
+        }
+        $capWarn.hidden = !capped;
+    }
+
+    /* ---- controls (wired once) ---------------------------------------- */
+    $nSlider.addEventListener('input', () => { N = +$nSlider.value; $nOut.textContent = N; });
+    $speedSlider.addEventListener('input', () => { speed = +$speedSlider.value / 10; $speedOut.textContent = speed.toFixed(1) + '×'; });
+    $ctrl.addEventListener('change', () => {
+        useControl = $ctrl.checked;
+        $store.textContent = useControl ? 'Set<string>' : 'lite-overlap';
+        overlap.clear();
+        ctrlPrev = new Set();
+        gcEvents = 0; sparkCount = 0;
+        for (let s = 0; s < EFX; s++) efxBorn[s] = -1000;
+    });
+
     for (let s = 0; s < EFX; s++) efxBorn[s] = -1000;
-});
-$themeBtn.addEventListener('click', () => {
+
+    return {
+        id: '01',
+        enter() { $aside.hidden = false; $hint.hidden = false; },
+        exit() { $aside.hidden = true; $hint.hidden = true; },
+        onResize() {
+            const sr = $spark.getBoundingClientRect();
+            sparkW = Math.max(1, Math.floor(sr.width));
+            $spark.width = sparkW * DPR;
+            $spark.height = 56 * DPR;
+            sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+            if (!seeded && W >= 64 && H >= 64) { reseed(); seeded = true; }
+        },
+        frame(now) {
+            if (!seeded) return;             // idle until the stage has a real size
+            step(); draw(); drawSpark();
+            if ((frame & 7) === 0) publish(now);
+        },
+    };
+})();
+
+/* =======================================================================
+   SCENE 03 -- TRAVERSE  (the O1 perf argument, animated)
+   Builds a real DynamicBVH2D, then STEPS a faithful port of the library's
+   collectPairs self-traversal so the descent is watchable. The animated
+   pair count is gated against the real overlap.collectPairs AND a brute-force
+   O(N^2) oracle on the same tree -- the demo checks the library, never echoes it.
+   Every buffer below is allocated ONCE; stepping and drawing allocate nothing.
+   ======================================================================= */
+const Scene03 = (() => {
+    const $aside = document.getElementById('aside03');
+    const $hint = document.getElementById('hint03');
+
+    const $tested = document.getElementById('tTested');
+    const $found = document.getElementById('tFound');
+    const $depth = document.getElementById('tDepth');
+    const $hw = document.getElementById('tHw');
+    const $cap = document.getElementById('tCap');
+    const $directed = document.getElementById('tDirected');
+    const $nqPairs = document.getElementById('tNqPairs');
+    const $travMs = document.getElementById('tTravMs');
+    const $nqMs = document.getElementById('tNqMs');
+    const $msPill = document.getElementById('tMsPill');
+    const $verPill = document.getElementById('tVerPill');
+    const $anim = document.getElementById('tAnim');
+    const $lib = document.getElementById('tLib');
+    const $brute = document.getElementById('tBrute');
+    const $nSlider = document.getElementById('tNSlider');
+    const $nOut = document.getElementById('tNOut');
+    const $speedSlider = document.getElementById('tSpeedSlider');
+    const $speedOut = document.getElementById('tSpeedOut');
+    const $stepBtn = document.getElementById('tStepBtn');
+    const $replayBtn = document.getElementById('tReplayBtn');
+    const $status = document.getElementById('tStatus');
+
+    /* ---- fixed buffers, allocated ONCE -------------------------------- */
+    const T_MAXN = 96;                         // max entities in this scene
+    const T_MAXNODES = 4 * T_MAXN;             // bvh node cap (>= 2N-1, with slack)
+    const T_FIELD = 1000;                      // world units; entities live in [0, T_FIELD]^2
+
+    const tree = new DynamicBVH2D(T_MAXNODES);
+    // Separate instance for the headless check. Sized near the scene's real pair
+    // count on purpose: end() is O(capacity), so an oversized table would make the
+    // traverse-vs-N-query wall-clock meaningless (it would time the table scan, not
+    // the descent). Pair counts here stay well under this for N <= 96.
+    const gate = createOverlap({ maxPairs: 256 });
+    const box = new Float32Array(4);           // insertion / query scratch (never aliases tree.bboxes)
+    const qOut = new Int32Array(T_MAXN);       // query out-buffer
+
+    const posX = new Float64Array(T_MAXN), posY = new Float64Array(T_MAXN);
+    const leafId = new Int32Array(T_MAXN);     // entity -> its live leaf node id
+
+    // node-pair traversal stack: (a, b) int pairs. Same no-grow bound the library
+    // uses -- 2 * maxNodes pairs = 4 * maxNodes ints (decision E1).
+    const STACK = new Int32Array(4 * T_MAXNODES);
+    const WALK = new Int32Array(T_MAXNODES);   // preallocated DFS stack for drawing live nodes
+
+    // effect ring: a found (mint) or pruned (rose) node-pair, drawn fading. World coords.
+    const T_EFX = 1 << 9, T_EFX_MASK = T_EFX - 1, T_EFX_TTL = 22;
+    const efxAx = new Float64Array(T_EFX), efxAy = new Float64Array(T_EFX);
+    const efxBx = new Float64Array(T_EFX), efxBy = new Float64Array(T_EFX);
+    const efxBorn = new Float64Array(T_EFX), efxKind = new Int32Array(T_EFX);
+    let efxHead = 0;
+
+    /* ---- scene state --------------------------------------------------- */
+    let tN = 72;
+    let tHalf = 26;
+    let speed = 6;                 // pops per frame; 0 = paused (step-only)
+    let built = false;
+    let frame = 0;
+
+    // traversal machine
+    let sp = 0;                    // stack pointer (ints)
+    let hwPairs = 0;              // stack high-water, in pairs
+    let tested = 0;              // cross-pair (box-overlap) tests performed
+    let found = 0;              // leaf-leaf pairs found
+    let curA = -1, curB = -1, curKind = 0;   // 0 self / 1 hit / 2 descend / 3 prune
+    let done = false;
+    let published = false;         // final (done) state already pushed to the DOM once
+
+    // per-build oracle + N-query column
+    let libPairs = 0, brutePairs = 0, verified = false;
+    let directed = 0, nqPairs = 0, nqMs = 0, travMs = 0;
+
+    // fit transform: world -> canvas (recomputed on resize / rebuild, never per frame)
+    let scale = 1, offX = 0, offY = 0;
+
+    function fit() {
+        const P = 20;
+        const s = Math.min((W - 2 * P) / T_FIELD, (H - 2 * P) / T_FIELD);
+        scale = s > 0 ? s : 1;
+        offX = (W - T_FIELD * scale) / 2;
+        offY = (H - T_FIELD * scale) / 2;
+    }
+    function sx(wx) { return offX + wx * scale; }
+    function sy(wy) { return offY + wy * scale; }
+    function cx(n) { return (tree.bboxes[n * 4] + tree.bboxes[n * 4 + 2]) * 0.5; }
+    function cy(n) { return (tree.bboxes[n * 4 + 1] + tree.bboxes[n * 4 + 3]) * 0.5; }
+
+    /* ---- build (cold): seed positions, fill the tree, run the oracle --- */
+    function seedPositions() {
+        let s = 0x1543beef >>> 0;
+        const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
+        for (let i = 0; i < tN; i++) {
+            posX[i] = tHalf + rnd() * (T_FIELD - 2 * tHalf);
+            posY[i] = tHalf + rnd() * (T_FIELD - 2 * tHalf);
+        }
+    }
+    function build() {
+        // Larger boxes when there are fewer entities, so nesting stays legible.
+        tHalf = Math.max(12, Math.round(46 - tN * 0.3));
+        seedPositions();
+        tree.clear();
+        for (let i = 0; i < tN; i++) {
+            box[0] = posX[i] - tHalf; box[1] = posY[i] - tHalf;
+            box[2] = posX[i] + tHalf; box[3] = posY[i] + tHalf;
+            leafId[i] = tree.insertLeaf(box, i);   // margin 0: fat box == tight box here
+        }
+        computeOracle();
+        computeNQuery();
+        resetTraversal();
+        // static per-build readouts
+        $cap.textContent = ' / ' + (STACK.length >> 1);
+        $directed.textContent = directed;
+        $nqPairs.textContent = nqPairs;
+        $lib.textContent = libPairs;
+        $brute.textContent = brutePairs;
+        $travMs.textContent = (travMs * 1000).toFixed(2) + ' us';
+        $nqMs.textContent = (nqMs * 1000).toFixed(2) + ' us';
+        // Headline is the WORK ratio -- exact and N-independent: the descent reports
+        // each pair ONCE, N-query reports it TWICE (directed = 2 x pairs). The
+        // wall-clock in the note is a micro-scale sample (near parity at demo N,
+        // and jittery near the timer floor); the rigorous crossover is bench/RESULTS.md.
+        const workRatio = nqPairs > 0 ? Math.round(directed / nqPairs) : 0;
+        $msPill.textContent = workRatio > 0 ? workRatio + '× less work' : '-';
+        $msPill.className = workRatio > 0 ? 'pill zero' : 'pill idle';
+    }
+
+    // Real library + brute force, both over the SAME f32 leaf boxes the tree stores,
+    // so all three must agree exactly (touching-edge convention included).
+    function computeOracle() {
+        gate.clear(); gate.begin(); gate.collectPairs(tree); gate.end();
+        libPairs = gate.pairCount();
+        const bb = tree.bboxes;
+        let c = 0;
+        for (let i = 0; i < tN; i++) {
+            const ia = leafId[i] * 4;
+            const ax0 = bb[ia], ay0 = bb[ia + 1], ax1 = bb[ia + 2], ay1 = bb[ia + 3];
+            for (let j = i + 1; j < tN; j++) {
+                const jb = leafId[j] * 4;
+                if (ax0 <= bb[jb + 2] && bb[jb] <= ax1 && ay0 <= bb[jb + 3] && bb[jb + 1] <= ay1) c++;
+            }
+        }
+        brutePairs = c;
+    }
+
+    // One full sweep of each path. `sink` keeps the work from being optimized away.
+    let sink = 0;
+    function oneNQuerySweep() {
+        const bb = tree.bboxes;
+        let acc = 0;
+        for (let i = 0; i < tN; i++) {
+            const ia = leafId[i] * 4;
+            box[0] = bb[ia]; box[1] = bb[ia + 1]; box[2] = bb[ia + 2]; box[3] = bb[ia + 3];
+            acc += tree.query(box, qOut);
+        }
+        sink += acc;
+    }
+    function oneTravSweep() {
+        gate.begin(); gate.collectPairs(tree); gate.end();
+        sink += gate.pairCount();
+    }
+    // Batch many sweeps into ONE interval and divide: a single sub-microsecond
+    // sweep rounds to 0 under a clamped performance.now() (file:// coarsens it to
+    // ~100us), so we grow the batch until it spans a resolvable span, then report
+    // per-sweep. Cold (build-time) only.
+    function timeSweeps(fn) {
+        for (let i = 0; i < 40; i++) fn();          // warm the JIT
+        let reps = 256;
+        for (let attempt = 0; attempt < 14; attempt++) {
+            const t0 = performance.now();
+            for (let i = 0; i < reps; i++) fn();
+            const dt = performance.now() - t0;
+            if (dt >= 20) return dt / reps;         // >= 20ms batch -> fine resolution
+            reps <<= 1;
+        }
+        return 0;
+    }
+
+    function computeNQuery() {
+        const bb = tree.bboxes;
+        let d = 0;
+        for (let i = 0; i < tN; i++) {
+            const ia = leafId[i] * 4;
+            box[0] = bb[ia]; box[1] = bb[ia + 1]; box[2] = bb[ia + 2]; box[3] = bb[ia + 3];
+            d += tree.query(box, qOut) - 1;    // minus the leaf's own self-hit
+        }
+        directed = d;
+        nqPairs = d >> 1;                      // each undirected pair reported twice
+
+        nqMs = timeSweeps(oneNQuerySweep);
+        travMs = timeSweeps(oneTravSweep);
+    }
+
+    function resetTraversal() {
+        sp = 0; hwPairs = 0; tested = 0; found = 0;
+        curA = -1; curB = -1; curKind = 0; done = false; published = false;
+        for (let s = 0; s < T_EFX; s++) efxBorn[s] = -1000;
+        const root = tree.root;
+        if (root < 0) { done = true; return; }         // empty tree
+        if (tree.children[root * 2] === -1) { done = true; return; }  // single leaf
+        STACK[sp++] = root; STACK[sp++] = root;         // self-pair (root, root)
+    }
+
+    function pushEfx(a, b, kind) {
+        const s = efxHead & T_EFX_MASK;
+        efxAx[s] = cx(a); efxAy[s] = cy(a); efxBx[s] = cx(b); efxBy[s] = cy(b);
+        efxBorn[s] = frame; efxKind[s] = kind; efxHead++;
+    }
+
+    // One pop of the self-traversal -- a faithful port of Overlap.js collectPairs
+    // (decision E4). The 94-vs-1543 line is the self-pair re-emission of (L,L)/(R,R).
+    function stepOne() {
+        if (done || sp <= 0) { done = true; return; }
+        if (sp > hwPairs * 2) hwPairs = sp >> 1;
+        const cap = STACK.length;
+        const children = tree.children, heights = tree.heights, bboxes = tree.bboxes;
+        const b = STACK[--sp];
+        const a = STACK[--sp];
+        curA = a; curB = b;
+
+        if (a === b) {
+            // self-pair (n, n): n internal by construction
+            curKind = 0;
+            const n2 = a * 2;
+            const L = children[n2], R = children[n2 + 1];
+            if (sp + 6 > cap) throw new Error('traverse: stack overflow');
+            const Lleaf = children[L * 2] === -1;
+            const Rleaf = children[R * 2] === -1;
+            if (!Lleaf) { STACK[sp++] = L; STACK[sp++] = L; }   // (L, L)
+            if (!Rleaf) { STACK[sp++] = R; STACK[sp++] = R; }   // (R, R)
+            STACK[sp++] = L; STACK[sp++] = R;                    // cross (L, R)
+        } else {
+            const a4 = a * 4, b4 = b * 4;
+            tested++;
+            if (bboxes[a4] <= bboxes[b4 + 2] && bboxes[b4] <= bboxes[a4 + 2] &&
+                bboxes[a4 + 1] <= bboxes[b4 + 3] && bboxes[b4 + 1] <= bboxes[a4 + 3]) {
+                const aLeaf = children[a * 2] === -1;
+                const bLeaf = children[b * 2] === -1;
+                if (aLeaf && bLeaf) {
+                    curKind = 1;                 // leaf-leaf hit
+                    found++;
+                    pushEfx(a, b, 0);
+                } else {
+                    curKind = 2;                 // descend the taller node (tie -> a)
+                    if (sp + 4 > cap) throw new Error('traverse: stack overflow');
+                    if (heights[a] >= heights[b]) {
+                        const c0 = children[a * 2], c1 = children[a * 2 + 1];
+                        STACK[sp++] = c0; STACK[sp++] = b;
+                        STACK[sp++] = c1; STACK[sp++] = b;
+                    } else {
+                        const c0 = children[b * 2], c1 = children[b * 2 + 1];
+                        STACK[sp++] = a; STACK[sp++] = c0;
+                        STACK[sp++] = a; STACK[sp++] = c1;
+                    }
+                }
+            } else {
+                curKind = 3;                     // miss -> prune
+                pushEfx(a, b, 1);
+            }
+        }
+        if (sp <= 0) { done = true; verify(); }
+    }
+
+    function verify() {
+        verified = (found === libPairs && found === brutePairs);
+        if (!verified && typeof console !== 'undefined') {
+            console.warn('scene03 MISMATCH: animated', found, 'library', libPairs, 'brute', brutePairs);
+        }
+    }
+
+    function strokeNode(n) {
+        const x0 = sx(tree.bboxes[n * 4]), y0 = sy(tree.bboxes[n * 4 + 1]);
+        const x1 = sx(tree.bboxes[n * 4 + 2]), y1 = sy(tree.bboxes[n * 4 + 3]);
+        vctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    }
+
+    function draw() {
+        vctx.clearRect(0, 0, W, H);
+        const root = tree.root;
+        if (root < 0) return;
+        const bboxes = tree.bboxes, children = tree.children;
+
+        // all live nodes, DFS from root over a preallocated walk stack (no alloc)
+        let wp = 0; WALK[wp++] = root;
+        while (wp > 0) {
+            const n = WALK[--wp];
+            const x0 = sx(bboxes[n * 4]), y0 = sy(bboxes[n * 4 + 1]);
+            const x1 = sx(bboxes[n * 4 + 2]), y1 = sy(bboxes[n * 4 + 3]);
+            if (children[n * 2] === -1) {                 // leaf
+                vctx.fillStyle = COL.steady; vctx.globalAlpha = 0.5;
+                vctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+                vctx.globalAlpha = 1;
+            } else {                                       // internal
+                vctx.strokeStyle = COL.node; vctx.globalAlpha = 0.85; vctx.lineWidth = 1;
+                vctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0, y1 - y0);
+                vctx.globalAlpha = 1;
+                WALK[wp++] = children[n * 2]; WALK[wp++] = children[n * 2 + 1];
+            }
+        }
+
+        // fading effects: mint = pair found, rose = pruned
+        for (let s = 0; s < T_EFX; s++) {
+            const age = frame - efxBorn[s];
+            if (age < 0 || age > T_EFX_TTL) continue;
+            const t = 1 - age / T_EFX_TTL;
+            const hit = efxKind[s] === 0;
+            vctx.globalAlpha = t * (hit ? 0.95 : 0.5);
+            vctx.strokeStyle = hit ? COL.enter : COL.exit;
+            vctx.lineWidth = hit ? 1 + 2 * t : 1;
+            vctx.beginPath();
+            vctx.moveTo(sx(efxAx[s]), sy(efxAy[s])); vctx.lineTo(sx(efxBx[s]), sy(efxBy[s]));
+            vctx.stroke();
+            if (hit) {
+                vctx.fillStyle = COL.enter;
+                vctx.beginPath(); vctx.arc(sx(efxAx[s]), sy(efxAy[s]), 1 + 2.2 * t, 0, 6.2832); vctx.fill();
+                vctx.beginPath(); vctx.arc(sx(efxBx[s]), sy(efxBy[s]), 1 + 2.2 * t, 0, 6.2832); vctx.fill();
+            }
+        }
+        vctx.globalAlpha = 1;
+
+        // current step: highlight the (nodeA, nodeB) being examined
+        if (curA >= 0 && !done) {
+            const col = curKind === 0 ? COL.warn : curKind === 2 ? COL.steady : curKind === 1 ? COL.enter : COL.exit;
+            vctx.strokeStyle = col; vctx.lineWidth = 2; vctx.globalAlpha = 0.95;
+            strokeNode(curA); if (curB !== curA) strokeNode(curB);
+            vctx.globalAlpha = 0.65; vctx.lineWidth = 1.5;
+            vctx.beginPath();
+            vctx.moveTo(sx(cx(curA)), sy(cy(curA))); vctx.lineTo(sx(cx(curB)), sy(cy(curB)));
+            vctx.stroke();
+            vctx.globalAlpha = 1;
+        }
+    }
+
+    function publish() {
+        $tested.textContent = tested;
+        $found.textContent = found;
+        $depth.textContent = (sp >> 1);
+        $hw.textContent = hwPairs;
+        $anim.textContent = found;
+        if (done) {
+            $verPill.textContent = verified ? 'match' : 'MISMATCH';
+            $verPill.className = verified ? 'pill zero' : 'pill hot';
+            $status.textContent = verified
+                ? 'done -- animated set equals the library and the brute oracle.'
+                : 'MISMATCH -- see console.';
+            published = true;      // static from here; frame() stops re-publishing
+        } else {
+            $verPill.textContent = '...'; $verPill.className = 'pill idle';
+            $status.textContent = speed === 0 ? 'paused -- press step.' : 'traversing...';
+        }
+    }
+
+    /* ---- controls (wired once) ---------------------------------------- */
+    $nSlider.addEventListener('input', () => {
+        tN = +$nSlider.value; $nOut.textContent = tN;
+        build(); fit();
+    });
+    $speedSlider.addEventListener('input', () => {
+        speed = +$speedSlider.value;
+        $speedOut.textContent = speed === 0 ? 'step' : (speed + ' / frame');
+    });
+    // Manual controls refresh the view immediately -- publish() is otherwise
+    // rAF-gated, so a paused step would not update the readouts until the next frame.
+    $stepBtn.addEventListener('click', () => { if (!done) { stepOne(); draw(); publish(); } });
+    $replayBtn.addEventListener('click', () => { resetTraversal(); draw(); publish(); });
+
+    return {
+        id: '03',
+        enter() {
+            $aside.hidden = false; $hint.hidden = false;
+            if (!built) { build(); built = true; }
+        },
+        exit() { $aside.hidden = true; $hint.hidden = true; },
+        onResize() { fit(); },
+        frame() {
+            frame++;
+            if (!built) return;
+            if (speed > 0 && !done) { for (let k = 0; k < speed && !done; k++) stepOne(); }
+            draw();
+            // Publish is telemetry, not the 0-alloc frame path: throttle to ~7.5Hz,
+            // and once the run is done + shown, stop re-writing the same static values.
+            if ((frame & 7) === 0 && !(done && published)) publish();
+        },
+    };
+})();
+
+/* =======================================================================
+   BOOT
+   ======================================================================= */
+scenes['01'] = Scene01;
+scenes['03'] = Scene03;
+
+document.getElementById('themeBtn').addEventListener('click', () => {
     const cur = document.documentElement.getAttribute('data-theme');
     const next = cur === 'light' ? 'dark' : (cur === 'dark' ? 'light' : (matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark'));
     document.documentElement.setAttribute('data-theme', next);
@@ -616,13 +1123,11 @@ $themeBtn.addEventListener('click', () => {
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', reloadColors);
 
-/* ---- boot -------------------------------------------------------------- */
 reloadColors();
-for (let s = 0; s < EFX; s++) efxBorn[s] = -1000;
-lastPublishT = performance.now();
-resize();                       // seeds if the stage already has a real size...
-requestAnimationFrame(loop);    // ...otherwise the ResizeObserver seeds; loop idles
-// A tab that boots hidden (throttled rAF) still paints on visibility; re-seed then.
+active = Scene01;
+Scene01.enter();
+resize();                        // sizes the viewport; scene onResize seeds/fits
+requestAnimationFrame(loop);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) resize(); });
 </script>
 </body>
