@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-overlap",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Zero-GC persistent overlap events over a dynamic BVH (2D): turns a per-frame set of overlapping pairs into a per-frame delta -- enter / stay / exit -- with zero allocation per frame. Open-addressed Int32Array pair table, 1-bit alternating-tag mark-sweep. Single-file ESM, zero runtime deps.",
   "type": "module",
   "main": "./Overlap.js",

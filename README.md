@@ -47,6 +47,7 @@ for (let k = 0; k < nExit; k++) onOverlapEnd(exitA[k], exitB[k]);
 - [Two ways to feed a frame](#two-ways-to-feed-a-frame)
 - [Fat vs tight: the one thing to get right](#fat-vs-tight-the-one-thing-to-get-right)
 - [Layers and filters](#layers-and-filters)
+- [Swept detection](#swept-detection-a-trigger-you-can-shoot-through-is-a-bug)
 - [How it works](#how-it-works)
 - [API](#api) - [Guarantees](#guarantees) - [License](#license)
 
@@ -179,6 +180,58 @@ behaves exactly as it did before layers existed. Filter state is sampled inside
 `collectPairs` -- set it **before** the frame's collect. `maxEntityId` is an
 optional constructor cap for the layer arrays; omit it and they grow on demand.
 
+## Swept detection: a trigger you can shoot through is a bug
+
+A projectile moving faster than its own width is in front of a thin trigger at
+frame N and behind it at frame N+1. It overlapped at no sampled instant, so
+discrete detection never fires -- the projectile tunnels straight through. This is
+the bug every discrete-sampling trigger system has, and it is a broadphase
+question, not a physics one.
+
+`addSwept` (by hand) and `collectSweptPairs` (bulk, over a BVH) test the **swept
+volume** -- the AABB `union(prev, curr)` -- instead of the instantaneous box:
+
+```js
+import { createOverlap } from '@zakkster/lite-overlap';
+
+const ov = createOverlap({ maxPairs: 4096 });
+
+ov.begin();
+// projectile's box last frame vs this frame; the wall is static (prev === curr)
+ov.addSwept(bulletId, bulletPrev, bulletCurr, wallId, wallBox, wallBox);
+ov.end();
+ov.drainEnter(outA, outB);   // the crossing fires ENTER, like any other pair
+```
+
+The committed tunneling fixture -- a 6-wide projectile crossing a wall in one
+frame (`test/OverlapSwept.test.mjs`, decision S6):
+
+| projectile speed (px/frame) | wall thickness (px) | discrete | swept |
+| ---: | ---: | :---: | :---: |
+| 40 | 60 | ✅ hit | ✅ hit |
+| 120 | 8 | ❌ **tunnels** | ✅ hit |
+| 400 | 6 | ❌ **tunnels** | ✅ hit |
+| 1500 | 2 | ❌ **tunnels** | ✅ hit |
+
+Three properties, all tested:
+
+- **Superset, never a loss.** The swept set always contains the discrete set (the
+  union contains `curr`); with zero motion (`prev === curr`) it is byte-identical
+  to `collectPairs`.
+- **Enter fires through the ordinary channel.** A pass-through fires `enter` on the
+  crossing frame and `exit` the next -- the same `drainEnter` / `drainExit` you
+  already read. There is no separate event to wire, so a caller cannot forget it
+  and silently miss a hit.
+- **Conservative, not exact.** The axis-aligned union over-reports diagonal motion
+  (it is the bounding rectangle of a thin diagonal sweep). Never a missed pair;
+  gate geometry with your own tight boxes via `narrow`, as after any broadphase.
+
+`collectSweptPairs(tree, prevPacked, currPacked, count)` has one contract: build
+the tree's leaf boxes to **bound the motion** -- `fatten(union(prev, curr))` -- or
+the descent prunes the tunneling pair before the tight-union refinement can see
+it. The packed prev/curr boxes are indexed by `userData`; a leaf id `>= count`
+fails closed.
+
 ## How it works
 
 - **Pair identity is two parallel `Int32Array`s**, never one packed number. Two
@@ -199,6 +252,12 @@ optional constructor cap for the layer arrays; omit it and they grow on demand.
 - **Capacity is fixed and every overflow is atomic.** A pair past `maxPairs`
   throws *before* mutating -- the table is left unchanged and usable, and the
   message names the remedy. Size it from `stats().highWaterMark`.
+- **`collectSweptPairs` shares that one descent.** It is `collectPairs` with a
+  tight-`union(prev, curr)` recheck spliced in at each leaf-leaf candidate before
+  `add` -- so the tunneling fix inherits the same zero-alloc stack, the same
+  fail-closed corruption checks, and the same 94-vs-1,543 correctness proof, and
+  feeds the identical lifecycle. The swept unions are computed in registers; the
+  union is inlined, so there is still no runtime dependency on `@zakkster/lite-aabb`.
 
 ## API
 
@@ -208,6 +267,8 @@ optional constructor cap for the layer arrays; omit it and they grow on demand.
 | `begin()` | Open a frame. O(1). |
 | `add(a, b)` | Report a pair by hand. Order-invariant, idempotent, throws atomically past `maxPairs`. Unfiltered (the raw door). |
 | `collectPairs(tree)` | Report every overlapping pair in a BVH, once. Fat-bound; filtered during the descent; feeds `add`. |
+| `collectSweptPairs(tree, prevPacked, currPacked, count)` | Swept broadphase: catches tunneling. Tree leaves must bound the motion; refines each pair with the tight `union(prev, curr)`. Superset of `collectPairs`. |
+| `addSwept(a, prevA, currA, b, prevB, currB)` | Report a swept pair by hand -- records it iff the two swept volumes overlap. The oracle for `collectSweptPairs`. Unfiltered. |
 | `end()` | Close the frame; emit and remove exits. O(capacity). |
 | `setLayer(id, layer)` | Put entity `id` on a layer `[0, 31]` (default 0). Keyed by `userData`; cold path. |
 | `setInteract(a, b, on)` | Turn the layer pair `(a, b)` on/off. Symmetric; all-on by default. Cold path. |
@@ -217,6 +278,7 @@ optional constructor cap for the layer arrays; omit it and they grow on demand.
 | `stats()` | `pairCount`, `stayCount`, `capacity`, `loadFactor`, `probeHighWater`, `highWaterMark`, `stackHighWater`, `epoch`. Cold path. |
 | `clear()` | Empty the table without reallocating and without emitting exits. |
 | `narrow(boxA, boxB)` | Tight AABB overlap on two of **your** boxes. Pure boolean, zero alloc. |
+| `sweptOverlap(prevA, currA, prevB, currB)` | The swept analog of `narrow`: do the two swept volumes overlap? Pure boolean, zero alloc. |
 | `VERSION` / `FORMAT_VERSION` | Package semver / shared buffer-contract version (= `1`). |
 
 Full types and per-method contracts are in `Overlap.d.ts`.
@@ -224,9 +286,10 @@ Full types and per-method contracts are in `Overlap.d.ts`.
 ## Guarantees
 
 - **Zero runtime dependencies.** Single ESM file, `sideEffects: false`.
-- **Zero allocation on every frame path** -- `add`, `collectPairs`, `end`, the
-  drains, `narrow`. Proven by a `node --expose-gc` torture gate at `maxMajor: 0`
-  and `maxArrayBuffersGrowth: 0`, with a `Set<string>` control that **must fail**
+- **Zero allocation on every frame path** -- `add`, `collectPairs`,
+  `collectSweptPairs`, `end`, the drains, `narrow`, `sweptOverlap`. Proven by a
+  `node --expose-gc` torture gate at `maxMajor: 0` and `maxArrayBuffersGrowth: 0`
+  (including 200k swept collects), with a `Set<string>` control that **must fail**
   the gate, so the gate is falsifiable rather than decorative.
 - **Fail closed on every unverified state** -- capacity exhaustion, traversal
   stack overflow, and a corrupt tree (leaf signals that disagree) each throw with
@@ -240,6 +303,11 @@ Full types and per-method contracts are in `Overlap.d.ts`.
   filtered oracle **every frame** through rotation-provoking motion (so no cached
   node-keyed mask can go stale). Disabling an entity or a layer fires each affected
   exit exactly once. Filtering active keeps the alloc gate at zero.
+- **Swept catches what discrete misses, and never loses a pair** -- the committed
+  tunneling fixture proves discrete detection misses every fast/thin row and swept
+  catches it; the swept set is asserted a superset of the discrete set, and
+  byte-identical to it at zero motion. A world-scale ULP check (finding A-01) pins
+  the swept union strictly larger than its endpoints at coordinates up to 1e7.
 
 ## License
 

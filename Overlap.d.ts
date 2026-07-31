@@ -175,6 +175,100 @@ export interface Overlap {
     narrow(boxA: Float32Array, boxB: Float32Array): boolean;
 
     /**
+     * O3 -- swept self-traversal (decisions S1/S4): the tunneling fix. A
+     * projectile faster than its own width overlaps a thin trigger at NO sampled
+     * instant and tunnels through. This tests the swept volume `union(prev, curr)`
+     * instead of the instantaneous box, catching the crossing. Feeds {@link add}
+     * and the ordinary lifecycle (decision S2): a pass-through fires ENTER this
+     * frame through the normal channel and EXIT the next -- no new drain to wire,
+     * no pair silently missed.
+     *
+     * **Precondition (decision S4, a caller contract):** `tree`'s leaf boxes must
+     * BOUND the swept motion -- build them as `fatten(union(prev, curr))` (e.g. via
+     * `aabb2.merge` / `mergeAll`). A tree of instantaneous boxes prunes the
+     * tunneling pair before the refinement runs. The descent prunes on those
+     * swept-bounding boxes, and each surviving leaf pair is refined with the tight
+     * `union(prev, curr)` from the packed arrays -- dropping the fattening's
+     * over-reports as {@link narrow} does for the discrete path.
+     *
+     * `prevPacked` / `currPacked` hold the tight prev/curr boxes packed 4 floats
+     * per entity, indexed by `userData` (leaf `u` -> `[u*4 .. u*4+3]`) -- the same
+     * rotation-stable entity keying the O2 filter uses. The O2 filter applies
+     * identically here.
+     *
+     * Superset + identity (decision S3): every discrete pair is a swept pair (the
+     * union contains `curr`); and with `prevPacked === currPacked` (zero motion)
+     * this yields the byte-identical set {@link collectPairs} does. Zero allocation
+     * on the traversal -- both swept unions are register mins/maxes.
+     *
+     * @param tree swept-bounding SoA view (see precondition).
+     * @param prevPacked tight prev boxes, length `>= 4*count`, `userData`-indexed.
+     * @param currPacked tight curr boxes, length `>= 4*count`, `userData`-indexed.
+     * @param count entity-id bound; a leaf `userData >= count` throws (fail closed).
+     * @throws RangeError if `count` is not a non-negative integer, if a packed
+     *   array is shorter than `4*count`, or if a reached leaf's `userData >= count`.
+     * @throws TypeError if `prevPacked` / `currPacked` are not `Float32Array`.
+     *   Also throws on a corrupt tree and on `maxPairs` exhaustion, like
+     *   {@link collectPairs}.
+     */
+    collectSweptPairs(
+        tree: BvhTreeView,
+        prevPacked: Float32Array,
+        currPacked: Float32Array,
+        count: number,
+    ): void;
+
+    /**
+     * O3 -- the pure swept predicate (decision S1), the swept analog of
+     * {@link narrow}. Whether the swept volume of A (the AABB union of its prev and
+     * curr tight boxes) overlaps the swept volume of B. Zero allocation; no table,
+     * tree, or import.
+     *
+     * **Conservatism (S1):** the union never misses a real swept overlap but
+     * over-reports on diagonal motion (the union is the bounding rectangle of the
+     * thin diagonal sweep ribbon). The exact ribbon test is deferred; recheck
+     * geometry with your own tight boxes before acting, as after any broadphase.
+     *
+     * @param prevA A's tight prev box `[minX, minY, maxX, maxY]`.
+     * @param currA A's tight curr box.
+     * @param prevB B's tight prev box.
+     * @param currB B's tight curr box.
+     * @returns whether the two swept volumes overlap (touching edges count).
+     */
+    sweptOverlap(
+        prevA: Float32Array,
+        currA: Float32Array,
+        prevB: Float32Array,
+        currB: Float32Array,
+    ): boolean;
+
+    /**
+     * O3 -- the manual swept pair door (decision S1), the swept analog of
+     * {@link add}: supply the two entities' motions and it records the pair iff
+     * their swept volumes overlap. The differential ORACLE for
+     * {@link collectSweptPairs}. Feeds {@link add} (decision S2), so a pass-through
+     * fires ENTER this frame and EXIT the next. UNFILTERED by design, like `add` --
+     * the raw primitive stays pure; a caller feeding pairs by hand owns filtering.
+     *
+     * @param a non-negative int32 entity id.
+     * @param prevBoxA A's tight prev box `[minX, minY, maxX, maxY]`.
+     * @param currBoxA A's tight curr box.
+     * @param b non-negative int32 entity id.
+     * @param prevBoxB B's tight prev box.
+     * @param currBoxB B's tight curr box.
+     * @throws if recording a new pair would exceed `maxPairs`, atomically, like
+     *   {@link add}.
+     */
+    addSwept(
+        a: number,
+        prevBoxA: Float32Array,
+        currBoxA: Float32Array,
+        b: number,
+        prevBoxB: Float32Array,
+        currBoxB: Float32Array,
+    ): void;
+
+    /**
      * O2 -- assign an entity to a collision layer (decision F1). Keyed by
      * `userData`, so the assignment survives bvh rotations (a refit relinks node
      * ids but never `userData` -- decision F3). Every entity defaults to layer 0.

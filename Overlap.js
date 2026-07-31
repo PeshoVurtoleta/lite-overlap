@@ -27,6 +27,15 @@
  *       rotations, which expose no hook) -- leaf-level filtering only.
  *   F4  filter at collect time, before `add`: a now-filtered pair is simply not
  *       re-stamped and exits through the normal O0 mark-sweep -- no special path.
+ * O3 (swept detection) decisions are in `decisions/0004-swept.md`:
+ *   S1  the swept volume is the AABB union of the prev and curr boxes -- inlined
+ *       (no aabb import); conservative broadphase, over-reports on diagonal motion.
+ *   S2  a pass-through fires ENTER on the crossing frame through the ordinary
+ *       `add`/mark-sweep channel (fail-safe: no new drain to miss), exit the next.
+ *   S3  swept is a superset of discrete, always; zero motion (prev===curr) is
+ *       byte-identical to the discrete path (min/max are idempotent, exact in f32).
+ *   S4  `collectSweptPairs` prunes on a swept-bounding tree (caller contract) and
+ *       refines each leaf pair with the tight union keyed by `userData` (fail-closed).
  *
  * Zero runtime dependencies. ASCII-only source.
  *
@@ -35,7 +44,7 @@
  */
 
 /** Package version. Keep in sync with package.json and llms.txt (three-place sync). */
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 /**
  * The version of the shared FORMAT contract (see @zakkster/lite-aabb FORMAT.md),
@@ -369,6 +378,208 @@ export function createOverlap(options) {
         }
     }
 
+    // --- O3 swept-refinement state (decisions 0004 S1/S4) ---------------------
+    //
+    // `collectSweptPairs` shares the O1 traversal (one descent implementation,
+    // one correctness proof) but refines each leaf-leaf candidate with the TIGHT
+    // swept union `union(prev, curr)` rather than the tree's box. The prev/curr
+    // packed boxes and their length are handed to the shared `traverse` through
+    // these closure slots -- set on the cold entry, read inside the loop -- so no
+    // per-call closure is allocated and the hot path carries no extra argument.
+    // Null between swept collects; the `swept` flag gates every read of them.
+    let sweptPrev = null;     // Float32Array, 4*count, userData-indexed (S4).
+    let sweptCurr = null;     // Float32Array, 4*count, userData-indexed (S4).
+    let sweptCount = 0;       // entity count bounding userData (fail-closed above).
+    // Cold, terminal message base for the S4 out-of-range fault, built ONCE.
+    const SWEPT_RANGE_MSG = 'lite-overlap: collectSweptPairs -- leaf userData out of range for count ';
+
+    /**
+     * The shared O1 self-traversal (decision 0002 E4), parameterized by `swept`.
+     * `swept === false` is the exact O1/O2 emit `collectPairs` ships; `swept ===
+     * true` adds the O3 tight-union refinement at each leaf-leaf candidate (S1/S4)
+     * before the identical O2 filter and `addPair`. Descent, pruning, the E4
+     * fail-closed leaf cross-checks, and the stack contract are byte-identical
+     * across both modes -- only the leaf-leaf emit differs, so the 94-vs-1,543
+     * traversal is proven once and reused. Zero allocation either way.
+     * @param {{ bboxes: Float32Array, children: Int32Array, heights: Int32Array,
+     *   userData: Int32Array, root: number, maxNodes: number }} tree
+     * @param {boolean} swept
+     */
+    function traverse(tree, swept) {
+        // Read the SoA members into locals ONCE (hot-path law: no repeated
+        // property loads inside the loop).
+        const bboxes = tree.bboxes;
+        const children = tree.children;
+        const heights = tree.heights;
+        const userData = tree.userData;
+        const root = tree.root;
+
+        // Cold: size the stack for this tree. Never inside the loop below.
+        ensureStack(tree.maxNodes);
+        const stack = traversalStack;
+        const cap = stack.length;   // slots
+
+        // O2 filter locals, hoisted ONCE (hot-path law). When filtering was
+        // never configured, `fActive` is false and the leaf-leaf emit runs the
+        // exact O1 path -- no filter loads, byte-identical set (F2 identity).
+        const fActive = filtersActive;
+        const eState = entityState;
+        const eLen = eState.length;
+        const mtx = matrix;
+
+        // O3 swept-refinement locals, hoisted ONCE (S1/S4). Only read when
+        // `swept` is true; null and 0 otherwise (collectPairs never sets them).
+        const sPrev = sweptPrev;
+        const sCurr = sweptCurr;
+        const sCount = sweptCount;
+
+        if (root < 0) return;       // empty tree -> zero pairs (E4).
+
+        // Seed / single-leaf, with the root's fail-closed leaf cross-check (E4).
+        const rootLeaf = children[root * 2] === -1;
+        if (rootLeaf !== (heights[root] === 0) || rootLeaf !== (userData[root] !== -1)) {
+            throw new Error(CORRUPT_MSG + root);
+        }
+        if (rootLeaf) return;       // single leaf -> zero pairs (E4).
+
+        let sp = 0;
+        stack[sp++] = root; stack[sp++] = root;   // self-pair (root, root).
+
+        while (sp > 0) {
+            if (sp > stackHwSlots) stackHwSlots = sp;
+            const b = stack[--sp];
+            const a = stack[--sp];
+
+            if (a === b) {
+                // ---- SELF-PAIR (n, n): n is internal by construction. ----
+                const n2 = a * 2;
+                const L = children[n2];
+                const R = children[n2 + 1];
+                // Reserve the worst case up front: up to 3 pairs = 6 slots
+                // ((L,L), (R,R), (L,R)). Reserve-before-push, throw on overflow
+                // (E1); never grow. The message is pre-built (cold).
+                if (sp + 6 > cap) throw new Error(stackOverflowMsg);
+                // Fail-closed leaf cross-check of L and R (E4).
+                const Lleaf = children[L * 2] === -1;
+                if (Lleaf !== (heights[L] === 0) || Lleaf !== (userData[L] !== -1)) throw new Error(CORRUPT_MSG + L);
+                const Rleaf = children[R * 2] === -1;
+                if (Rleaf !== (heights[R] === 0) || Rleaf !== (userData[R] !== -1)) throw new Error(CORRUPT_MSG + R);
+                // *** THE 94-vs-1,543 LINE (E4) ***: a self-pair MUST re-emit
+                // the self-pairs of its INTERNAL children, not only the cross
+                // term. Dropping (L,L)/(R,R) keeps only root-straddling pairs
+                // and silently loses every pair living inside one subtree --
+                // 94 pairs instead of 1,543, and nothing throws. Emit them.
+                if (!Lleaf) { stack[sp++] = L; stack[sp++] = L; }   // (L, L)
+                if (!Rleaf) { stack[sp++] = R; stack[sp++] = R; }   // (R, R)
+                stack[sp++] = L; stack[sp++] = R;                    // cross (L, R)
+            } else {
+                // ---- CROSS-PAIR (a, b): fat-box AABB overlap (E4). -------
+                // In swept mode the tree's boxes are the caller's SWEPT-bounding
+                // boxes (S4 precondition), so this prune is sound: a pruned pair
+                // could not have overlapped at any instant this frame.
+                const a4 = a * 4;
+                const b4 = b * 4;
+                if (bboxes[a4] <= bboxes[b4 + 2] && bboxes[b4] <= bboxes[a4 + 2] &&
+                    bboxes[a4 + 1] <= bboxes[b4 + 3] && bboxes[b4 + 1] <= bboxes[a4 + 3]) {
+                    const aLeaf = children[a * 2] === -1;
+                    if (aLeaf !== (heights[a] === 0) || aLeaf !== (userData[a] !== -1)) throw new Error(CORRUPT_MSG + a);
+                    const bLeaf = children[b * 2] === -1;
+                    if (bLeaf !== (heights[b] === 0) || bLeaf !== (userData[b] !== -1)) throw new Error(CORRUPT_MSG + b);
+                    if (aLeaf && bLeaf) {
+                        // Both leaves overlap: a candidate pair. The two nodes
+                        // are distinct indices by construction (E4), so equal
+                        // userData is a data-integrity fault -- two distinct
+                        // leaves sharing an id. FAIL CLOSED: without this,
+                        // add(id, id) is rejected as a self-pair (D1) and the
+                        // real collision is SILENTLY dropped -- the exact
+                        // missed-collision failure this session prevents.
+                        if (userData[a] === userData[b]) {
+                            throw new Error(DUP_ID_MSG + a + ' and ' + b +
+                                ' share userData ' + userData[a] + '. Leaf userData must be unique.');
+                        }
+                        const ua = userData[a];
+                        const ub = userData[b];
+                        // O3 SWEPT REFINEMENT (S1/S4), applied HERE -- before the
+                        // O2 filter and add, after the dup-userData throw. The
+                        // tree already proved the SWEPT-fat boxes overlap; this
+                        // recomputes the TIGHT union(prev, curr) and drops the
+                        // fat-only over-reports, exactly as narrow refines the
+                        // discrete path -- but inlined so no pair escapes to a
+                        // second call. A leaf userData beyond the motion arrays
+                        // is fail-closed (S4: null is not zero -- absent motion
+                        // must not silently pass as no-overlap).
+                        if (swept) {
+                            if (ua >= sCount || ub >= sCount) {
+                                throw new RangeError(SWEPT_RANGE_MSG + sCount +
+                                    ' (leaf userData ' + (ua >= sCount ? ua : ub) + '). Raise count.');
+                            }
+                            const qa = ua << 2;
+                            const qb = ub << 2;
+                            // Tight swept union of A (prev U curr), in registers.
+                            const pa0 = sPrev[qa], ca0 = sCurr[qa];
+                            const pa1 = sPrev[qa + 1], ca1 = sCurr[qa + 1];
+                            const pa2 = sPrev[qa + 2], ca2 = sCurr[qa + 2];
+                            const pa3 = sPrev[qa + 3], ca3 = sCurr[qa + 3];
+                            const aMinX = pa0 < ca0 ? pa0 : ca0;
+                            const aMinY = pa1 < ca1 ? pa1 : ca1;
+                            const aMaxX = pa2 > ca2 ? pa2 : ca2;
+                            const aMaxY = pa3 > ca3 ? pa3 : ca3;
+                            // Tight swept union of B.
+                            const pb0 = sPrev[qb], cb0 = sCurr[qb];
+                            const pb1 = sPrev[qb + 1], cb1 = sCurr[qb + 1];
+                            const pb2 = sPrev[qb + 2], cb2 = sCurr[qb + 2];
+                            const pb3 = sPrev[qb + 3], cb3 = sCurr[qb + 3];
+                            const bMinX = pb0 < cb0 ? pb0 : cb0;
+                            const bMinY = pb1 < cb1 ? pb1 : cb1;
+                            const bMaxX = pb2 > cb2 ? pb2 : cb2;
+                            const bMaxY = pb3 > cb3 ? pb3 : cb3;
+                            // Tight-union overlap (touching counts). Miss -> the
+                            // fat pair was a diagonal/near over-report: drop it.
+                            if (!(aMinX <= bMaxX && bMinX <= aMaxX &&
+                                  aMinY <= bMaxY && bMinY <= aMaxY)) {
+                                continue;
+                            }
+                        }
+                        // O2 FILTER (F1/F2/F4), applied HERE -- at collect, before
+                        // add. An id beyond eLen reads the default 0 (layer 0 +
+                        // enabled), the O1 identity.
+                        if (fActive) {
+                            const sa = ua < eLen ? eState[ua] : 0;
+                            const sb = ub < eLen ? eState[ub] : 0;
+                            if ((sa & DISABLED_BIT) === 0 && (sb & DISABLED_BIT) === 0 &&
+                                ((mtx[sa & LAYER_MASK] >>> (sb & LAYER_MASK)) & 1) === 1) {
+                                addPair(ua, ub);   // dedups, canonicalizes lo < hi (D1/E3).
+                            }
+                        } else {
+                            addPair(ua, ub);   // O1 identity: dedups, canonicalizes lo < hi.
+                        }
+                    } else {
+                        if (sp + 4 > cap) throw new Error(stackOverflowMsg);
+                        // Descend the TALLER node (tie -> a). The taller is
+                        // internal by construction: a leaf has height 0, which
+                        // cannot be strictly tallest unless the other is a leaf
+                        // too (handled above). Expand from ONE side only, so
+                        // no cross relationship is visited twice (E4 / E1).
+                        if (heights[a] >= heights[b]) {
+                            const c2 = a * 2;
+                            const c0 = children[c2];
+                            const c1 = children[c2 + 1];
+                            stack[sp++] = c0; stack[sp++] = b;
+                            stack[sp++] = c1; stack[sp++] = b;
+                        } else {
+                            const c2 = b * 2;
+                            const c0 = children[c2];
+                            const c1 = children[c2 + 1];
+                            stack[sp++] = a; stack[sp++] = c0;
+                            stack[sp++] = a; stack[sp++] = c1;
+                        }
+                    }
+                }
+                // miss -> prune (drop the pair).
+            }
+        }
+    }
+
     return {
         /**
          * Open a frame. Flips the tag (so every slot's stamp is now stale),
@@ -452,131 +663,73 @@ export function createOverlap(options) {
          *   userData: Int32Array, root: number, maxNodes: number }} tree
          */
         collectPairs(tree) {
-            // Read the SoA members into locals ONCE (hot-path law: no repeated
-            // property loads inside the loop).
-            const bboxes = tree.bboxes;
-            const children = tree.children;
-            const heights = tree.heights;
-            const userData = tree.userData;
-            const root = tree.root;
+            traverse(tree, false);   // discrete emit; the O1/O2 path unchanged.
+        },
 
-            // Cold: size the stack for this tree. Never inside the loop below.
-            ensureStack(tree.maxNodes);
-            const stack = traversalStack;
-            const cap = stack.length;   // slots
-
-            // O2 filter locals, hoisted ONCE (hot-path law). When filtering was
-            // never configured, `fActive` is false and the leaf-leaf emit runs the
-            // exact O1 path -- no filter loads, byte-identical set (F2 identity).
-            const fActive = filtersActive;
-            const eState = entityState;
-            const eLen = eState.length;
-            const mtx = matrix;
-
-            if (root < 0) return;       // empty tree -> zero pairs (E4).
-
-            // Seed / single-leaf, with the root's fail-closed leaf cross-check (E4).
-            const rootLeaf = children[root * 2] === -1;
-            if (rootLeaf !== (heights[root] === 0) || rootLeaf !== (userData[root] !== -1)) {
-                throw new Error(CORRUPT_MSG + root);
+        /**
+         * O3 -- swept self-traversal (decisions 0004 S1/S4). The tunneling fix: a
+         * projectile faster than its own width tunnels through a thin trigger
+         * because its box overlaps the trigger's at NO sampled instant. This tests
+         * the swept volume `union(prev, curr)` instead of the instantaneous box, so
+         * the crossing is caught. Feeds the SAME `add` door and lifecycle as
+         * `collectPairs` (S2): a pass-through fires ENTER this frame through the
+         * ordinary channel and EXIT the next -- no new drain to wire up, no pair
+         * silently missed.
+         *
+         * PRECONDITION (S4, a caller contract, not machine-checkable): the tree's
+         * leaf boxes must BOUND the swept motion -- build them as
+         * `fatten(union(prev, curr))` (e.g. via `aabb2.merge` / `mergeAll`). A tree
+         * of instantaneous boxes prunes the tunneling pair before this can refine
+         * it, since the projectile's current box is nowhere near the wall. The
+         * descent prunes on those swept-bounding boxes (sound: a pruned pair could
+         * not overlap at any instant), and each surviving leaf pair is refined with
+         * the TIGHT `union(prev, curr)` from the packed motion arrays, dropping the
+         * fattening's over-reports exactly as `narrow` refines the discrete path.
+         *
+         * `prevPacked` / `currPacked` are the tight prev/curr boxes packed 4 floats
+         * per entity and indexed by `userData` (leaf `u` -> slots `[u*4, u*4+3]`),
+         * the same entity-id keying the O2 filter uses -- stable across bvh
+         * rotations. A leaf `userData >= count` is a fail-closed throw (S4: the
+         * motion arrays do not reach it, and a swept test on absent data must not
+         * silently pass as no-overlap -- null is not zero).
+         *
+         * Superset + identity (S3): every discrete pair is a swept pair (the union
+         * contains `curr`); and with `prevPacked === currPacked` (zero motion) the
+         * union IS the current box, so this produces the byte-identical set
+         * `collectPairs` does on the same tree. The O2 filter applies identically.
+         * Zero allocation on the traversal: both swept unions are register mins/
+         * maxes, no scratch box, no per-pair object.
+         *
+         * @param {{ bboxes: Float32Array, children: Int32Array, heights: Int32Array,
+         *   userData: Int32Array, root: number, maxNodes: number }} tree swept-bounding.
+         * @param {Float32Array} prevPacked tight prev boxes, length >= 4*count, userData-indexed.
+         * @param {Float32Array} currPacked tight curr boxes, length >= 4*count, userData-indexed.
+         * @param {number} count entity-id bound; leaf userData must be < count.
+         */
+        collectSweptPairs(tree, prevPacked, currPacked, count) {
+            // Cold entry validation (fail closed before any descent).
+            if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+                throw new RangeError('lite-overlap: collectSweptPairs count must be a non-negative integer, got ' + String(count) + '.');
             }
-            if (rootLeaf) return;       // single leaf -> zero pairs (E4).
-
-            let sp = 0;
-            stack[sp++] = root; stack[sp++] = root;   // self-pair (root, root).
-
-            while (sp > 0) {
-                if (sp > stackHwSlots) stackHwSlots = sp;
-                const b = stack[--sp];
-                const a = stack[--sp];
-
-                if (a === b) {
-                    // ---- SELF-PAIR (n, n): n is internal by construction. ----
-                    const n2 = a * 2;
-                    const L = children[n2];
-                    const R = children[n2 + 1];
-                    // Reserve the worst case up front: up to 3 pairs = 6 slots
-                    // ((L,L), (R,R), (L,R)). Reserve-before-push, throw on overflow
-                    // (E1); never grow. The message is pre-built (cold).
-                    if (sp + 6 > cap) throw new Error(stackOverflowMsg);
-                    // Fail-closed leaf cross-check of L and R (E4).
-                    const Lleaf = children[L * 2] === -1;
-                    if (Lleaf !== (heights[L] === 0) || Lleaf !== (userData[L] !== -1)) throw new Error(CORRUPT_MSG + L);
-                    const Rleaf = children[R * 2] === -1;
-                    if (Rleaf !== (heights[R] === 0) || Rleaf !== (userData[R] !== -1)) throw new Error(CORRUPT_MSG + R);
-                    // *** THE 94-vs-1,543 LINE (E4) ***: a self-pair MUST re-emit
-                    // the self-pairs of its INTERNAL children, not only the cross
-                    // term. Dropping (L,L)/(R,R) keeps only root-straddling pairs
-                    // and silently loses every pair living inside one subtree --
-                    // 94 pairs instead of 1,543, and nothing throws. Emit them.
-                    if (!Lleaf) { stack[sp++] = L; stack[sp++] = L; }   // (L, L)
-                    if (!Rleaf) { stack[sp++] = R; stack[sp++] = R; }   // (R, R)
-                    stack[sp++] = L; stack[sp++] = R;                    // cross (L, R)
-                } else {
-                    // ---- CROSS-PAIR (a, b): fat-box AABB overlap (E4). -------
-                    const a4 = a * 4;
-                    const b4 = b * 4;
-                    if (bboxes[a4] <= bboxes[b4 + 2] && bboxes[b4] <= bboxes[a4 + 2] &&
-                        bboxes[a4 + 1] <= bboxes[b4 + 3] && bboxes[b4 + 1] <= bboxes[a4 + 3]) {
-                        const aLeaf = children[a * 2] === -1;
-                        if (aLeaf !== (heights[a] === 0) || aLeaf !== (userData[a] !== -1)) throw new Error(CORRUPT_MSG + a);
-                        const bLeaf = children[b * 2] === -1;
-                        if (bLeaf !== (heights[b] === 0) || bLeaf !== (userData[b] !== -1)) throw new Error(CORRUPT_MSG + b);
-                        if (aLeaf && bLeaf) {
-                            // Both leaves overlap: a candidate pair. The two nodes
-                            // are distinct indices by construction (E4), so equal
-                            // userData is a data-integrity fault -- two distinct
-                            // leaves sharing an id. FAIL CLOSED: without this,
-                            // add(id, id) is rejected as a self-pair (D1) and the
-                            // real collision is SILENTLY dropped -- the exact
-                            // missed-collision failure this session prevents.
-                            if (userData[a] === userData[b]) {
-                                throw new Error(DUP_ID_MSG + a + ' and ' + b +
-                                    ' share userData ' + userData[a] + '. Leaf userData must be unique.');
-                            }
-                            const ua = userData[a];
-                            const ub = userData[b];
-                            // O2 FILTER (F1/F2/F4), applied HERE -- at collect,
-                            // before add. The dup-userData throw above runs FIRST:
-                            // filtering must never mask a corrupt tree (F1). A pair
-                            // that fails the filter is simply not re-stamped this
-                            // frame, so the O0 sweep exits it at end() -- no special
-                            // exit path (F4). An id beyond eLen reads the default 0
-                            // (layer 0 + enabled), the O1 identity.
-                            if (fActive) {
-                                const sa = ua < eLen ? eState[ua] : 0;
-                                const sb = ub < eLen ? eState[ub] : 0;
-                                if ((sa & DISABLED_BIT) === 0 && (sb & DISABLED_BIT) === 0 &&
-                                    ((mtx[sa & LAYER_MASK] >>> (sb & LAYER_MASK)) & 1) === 1) {
-                                    addPair(ua, ub);   // dedups, canonicalizes lo < hi (D1/E3).
-                                }
-                            } else {
-                                addPair(ua, ub);   // O1 identity: dedups, canonicalizes lo < hi.
-                            }
-                        } else {
-                            if (sp + 4 > cap) throw new Error(stackOverflowMsg);
-                            // Descend the TALLER node (tie -> a). The taller is
-                            // internal by construction: a leaf has height 0, which
-                            // cannot be strictly tallest unless the other is a leaf
-                            // too (handled above). Expand from ONE side only, so
-                            // no cross relationship is visited twice (E4 / E1).
-                            if (heights[a] >= heights[b]) {
-                                const c2 = a * 2;
-                                const c0 = children[c2];
-                                const c1 = children[c2 + 1];
-                                stack[sp++] = c0; stack[sp++] = b;
-                                stack[sp++] = c1; stack[sp++] = b;
-                            } else {
-                                const c2 = b * 2;
-                                const c0 = children[c2];
-                                const c1 = children[c2 + 1];
-                                stack[sp++] = a; stack[sp++] = c0;
-                                stack[sp++] = a; stack[sp++] = c1;
-                            }
-                        }
-                    }
-                    // miss -> prune (drop the pair).
-                }
+            const need = count * 4;
+            if (!(prevPacked instanceof Float32Array) || !(currPacked instanceof Float32Array)) {
+                throw new TypeError('lite-overlap: collectSweptPairs requires prevPacked and currPacked as Float32Array.');
+            }
+            if (prevPacked.length < need || currPacked.length < need) {
+                throw new RangeError('lite-overlap: collectSweptPairs prev/curr packed length must be >= 4*count (' + need + ').');
+            }
+            // Hand the refinement inputs to the shared traversal via the closure
+            // slots (no per-call closure allocated), run swept, then clear them so
+            // a stray discrete collect can never read stale motion arrays.
+            sweptPrev = prevPacked;
+            sweptCurr = currPacked;
+            sweptCount = count;
+            try {
+                traverse(tree, true);
+            } finally {
+                sweptPrev = null;
+                sweptCurr = null;
+                sweptCount = 0;
             }
         },
 
@@ -602,6 +755,76 @@ export function createOverlap(options) {
         narrow(boxA, boxB) {
             return boxA[0] <= boxB[2] && boxB[0] <= boxA[2] &&
                 boxA[1] <= boxB[3] && boxB[1] <= boxA[3];
+        },
+
+        /**
+         * O3 -- the pure swept predicate (decision S1). Whether the swept volume
+         * of A (the AABB union of its prev and curr tight boxes) overlaps the swept
+         * volume of B. Zero allocation, no table, no tree, no import -- the
+         * primitive `addSwept` and `collectSweptPairs` are both built on, and the
+         * swept analog of `narrow`.
+         *
+         * CONSERVATISM (S1): the union is the tightest AXIS-ALIGNED box containing
+         * the whole linear sweep, so it never misses a real swept overlap but
+         * over-reports on diagonal motion (two entities crossing opposite corners
+         * of a shared bounding rectangle without their thin diagonal ribbons
+         * meeting still report). The exact ribbon test (`sweptOverlapExact`) is
+         * deferred; recheck geometry with your own tight boxes before acting, as
+         * after any broadphase.
+         *
+         * @param {Float32Array} prevA tight box `[minX, minY, maxX, maxY]`.
+         * @param {Float32Array} currA tight box `[minX, minY, maxX, maxY]`.
+         * @param {Float32Array} prevB tight box `[minX, minY, maxX, maxY]`.
+         * @param {Float32Array} currB tight box `[minX, minY, maxX, maxY]`.
+         * @returns {boolean} whether the two swept volumes overlap (touching counts).
+         */
+        sweptOverlap(prevA, currA, prevB, currB) {
+            const aMinX = Math.min(prevA[0], currA[0]);
+            const aMinY = Math.min(prevA[1], currA[1]);
+            const aMaxX = Math.max(prevA[2], currA[2]);
+            const aMaxY = Math.max(prevA[3], currA[3]);
+            const bMinX = Math.min(prevB[0], currB[0]);
+            const bMinY = Math.min(prevB[1], currB[1]);
+            const bMaxX = Math.max(prevB[2], currB[2]);
+            const bMaxY = Math.max(prevB[3], currB[3]);
+            return aMinX <= bMaxX && bMinX <= aMaxX &&
+                aMinY <= bMaxY && bMinY <= aMaxY;
+        },
+
+        /**
+         * O3 -- the manual swept pair door (decision S1). The swept analog of
+         * `add(a, b)`: supply the two entities' motions and it records the pair iff
+         * their swept volumes overlap. It is the differential ORACLE for
+         * `collectSweptPairs`, exactly as `add` is for `collectPairs` -- same table,
+         * same lifecycle, a different candidate source. Feeds `addPair` (S2), so a
+         * pass-through fires ENTER this frame and EXIT the next through the ordinary
+         * channel. UNFILTERED by design, like `add`: the raw primitive stays pure so
+         * it remains the oracle; a caller feeding pairs by hand owns its filtering.
+         *
+         * The roadmap's one-line sketch wrote a single-entity `addSwept(a, prev,
+         * curr)`; a swept volume yields a PAIR only against another swept volume, so
+         * the shipped door is the pair form (decision S1, on the record).
+         *
+         * @param {number} a non-negative int32 entity id.
+         * @param {Float32Array} prevBoxA A's tight prev box `[minX, minY, maxX, maxY]`.
+         * @param {Float32Array} currBoxA A's tight curr box.
+         * @param {number} b non-negative int32 entity id.
+         * @param {Float32Array} prevBoxB B's tight prev box.
+         * @param {Float32Array} currBoxB B's tight curr box.
+         */
+        addSwept(a, prevBoxA, currBoxA, b, prevBoxB, currBoxB) {
+            const aMinX = Math.min(prevBoxA[0], currBoxA[0]);
+            const aMinY = Math.min(prevBoxA[1], currBoxA[1]);
+            const aMaxX = Math.max(prevBoxA[2], currBoxA[2]);
+            const aMaxY = Math.max(prevBoxA[3], currBoxA[3]);
+            const bMinX = Math.min(prevBoxB[0], currBoxB[0]);
+            const bMinY = Math.min(prevBoxB[1], currBoxB[1]);
+            const bMaxX = Math.max(prevBoxB[2], currBoxB[2]);
+            const bMaxY = Math.max(prevBoxB[3], currBoxB[3]);
+            if (aMinX <= bMaxX && bMinX <= aMaxX &&
+                aMinY <= bMaxY && bMinY <= aMaxY) {
+                addPair(a, b);   // rejects a===b, canonicalizes lo < hi, dedups (D1).
+            }
         },
 
         /**

@@ -39,7 +39,7 @@ function key(a, b) {
 // =============================================================================
 
 test('VERSION is exported and in three-place sync', () => {
-    assert.equal(VERSION, '1.2.0');
+    assert.equal(VERSION, '1.3.0');
 });
 
 test('FORMAT_VERSION conformance: agrees with both peers (decision C1)', () => {

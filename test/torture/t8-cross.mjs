@@ -30,6 +30,12 @@
  *      lite-bvh B-08 rule -- an Int32Array stack grown mid-traversal is invisible
  *      to a heapUsed gate), plus 0 bytes/op net-retained. The traversal must be
  *      0 B/op exactly like add is.
+ *
+ *   6. O3 SWEPT (decision 0004 S1/S3/S4). Bulk collectSweptPairs over a tree of
+ *      FATTENED swept boxes == manual addSwept oracle == tight-union brute (the
+ *      refinement really tightens the fat descent); zero motion is byte-identical
+ *      to the discrete path (S3); and the swept traversal grows no buffer over
+ *      200k collects (0 B/op like collectPairs).
  */
 
 import { DynamicBVH2D } from '@zakkster/lite-bvh';
@@ -302,6 +308,120 @@ export function run(h) {
                 ' major=' + summary.gc.major + ' minor=' + summary.gc.minor +
                 ' maxMs=' + summary.gc.maxMs.toFixed(3) + ' bytes/op=' + bpo.toFixed(3);
             h.fail(TIER, 'collectPairs grew a buffer over ' + OPS + ' collects: ' + detail, {});
+        }
+    }
+
+    // --- 6. O3 swept (decision 0004 S1/S3/S4): differential + zero-alloc --------
+    // Build a moving corpus, a tree of the (fattened) swept boxes, and prove the
+    // bulk swept traversal agrees with BOTH the manual addSwept oracle and the
+    // tight-union brute force -- then that it grows no buffer over 200k collects
+    // and that zero motion is byte-identical to the discrete path (S3).
+    {
+        const N = 200, FIELD = 120, SPEED = 40, MARGIN = 5;
+        const seed = (h.SEED ^ 0x5e70ffff) >>> 0;
+        const rng = h.xorshift32(seed);
+        const prev = new Float32Array(N * 4);
+        const curr = new Float32Array(N * 4);
+        const uni = new Float32Array(N * 4);
+        for (let i = 0; i < N; i++) {
+            const j = i * 4;
+            const x = h.unit(rng()) * FIELD, y = h.unit(rng()) * FIELD;
+            const w = 4 + h.unit(rng()) * 8, hh = 4 + h.unit(rng()) * 8;
+            const vx = (h.unit(rng()) * 2 - 1) * SPEED, vy = (h.unit(rng()) * 2 - 1) * SPEED;
+            prev[j] = x; prev[j + 1] = y; prev[j + 2] = x + w; prev[j + 3] = y + hh;
+            curr[j] = x + vx; curr[j + 1] = y + vy; curr[j + 2] = x + w + vx; curr[j + 3] = y + hh + vy;
+            uni[j] = Math.min(prev[j], curr[j]); uni[j + 1] = Math.min(prev[j + 1], curr[j + 1]);
+            uni[j + 2] = Math.max(prev[j + 2], curr[j + 2]); uni[j + 3] = Math.max(prev[j + 3], curr[j + 3]);
+        }
+        // Tree of FATTENED swept boxes -> the descent over-reports; the tight-union
+        // refinement must pull it back to the tight-union brute.
+        const sweptTree = new DynamicBVH2D(4 * N);
+        const fb = new Float32Array(4);
+        for (let i = 0; i < N; i++) {
+            const j = i * 4;
+            fb[0] = uni[j] - MARGIN; fb[1] = uni[j + 1] - MARGIN;
+            fb[2] = uni[j + 2] + MARGIN; fb[3] = uni[j + 3] + MARGIN;
+            sweptTree.insertLeaf(fb, i);
+        }
+        const cap = N * N + 8;
+        const eA = new Int32Array(cap), eB = new Int32Array(cap);
+
+        // Bulk swept.
+        const ovS = createOverlap({ maxPairs: cap });
+        ovS.begin(); ovS.collectSweptPairs(sweptTree, prev, curr, N); ovS.end();
+        const setS = drainSet(ovS, eA, eB);
+
+        // Manual addSwept oracle over every unordered pair.
+        const ovM = createOverlap({ maxPairs: cap });
+        const pa = new Float32Array(4), ca = new Float32Array(4);
+        const pb = new Float32Array(4), cb = new Float32Array(4);
+        ovM.begin();
+        for (let i = 0; i < N; i++) {
+            for (let jj = i + 1; jj < N; jj++) {
+                const bi = i * 4, bj = jj * 4;
+                pa[0] = prev[bi]; pa[1] = prev[bi + 1]; pa[2] = prev[bi + 2]; pa[3] = prev[bi + 3];
+                ca[0] = curr[bi]; ca[1] = curr[bi + 1]; ca[2] = curr[bi + 2]; ca[3] = curr[bi + 3];
+                pb[0] = prev[bj]; pb[1] = prev[bj + 1]; pb[2] = prev[bj + 2]; pb[3] = prev[bj + 3];
+                cb[0] = curr[bj]; cb[1] = curr[bj + 1]; cb[2] = curr[bj + 2]; cb[3] = curr[bj + 3];
+                ovM.addSwept(i, pa, ca, jj, pb, cb);
+            }
+        }
+        ovM.end();
+        const setM = drainSet(ovM, eA, eB);
+
+        // Tight-union brute (ground truth).
+        const setBrute = new Set();
+        for (let i = 0; i < N; i++) {
+            const bi = i * 4;
+            for (let jj = i + 1; jj < N; jj++) {
+                const bj = jj * 4;
+                if (uni[bi] <= uni[bj + 2] && uni[bj] <= uni[bi + 2] &&
+                    uni[bi + 1] <= uni[bj + 3] && uni[bj + 1] <= uni[bi + 3]) setBrute.add(key(i, jj));
+            }
+        }
+        if (!sameSet(setS, setBrute)) {
+            h.fail(TIER, 'bulk swept != tight-union brute (' + setS.size + ' vs ' + setBrute.size + ')', {});
+        }
+        if (!sameSet(setM, setBrute)) {
+            h.fail(TIER, 'manual addSwept != tight-union brute (' + setM.size + ' vs ' + setBrute.size + ')', {});
+        }
+
+        // Zero motion (S3): a tree of the current boxes, prev===curr===curr, must
+        // reproduce collectPairs' set byte-for-byte.
+        const currTree = new DynamicBVH2D(4 * N);
+        const cbx = new Float32Array(4);
+        for (let i = 0; i < N; i++) {
+            const j = i * 4;
+            cbx[0] = curr[j]; cbx[1] = curr[j + 1]; cbx[2] = curr[j + 2]; cbx[3] = curr[j + 3];
+            currTree.insertLeaf(cbx, i);
+        }
+        const ovD = createOverlap({ maxPairs: cap });
+        ovD.begin(); ovD.collectPairs(currTree); ovD.end();
+        const setDiscrete = drainSet(ovD, eA, eB);
+        const ovZ = createOverlap({ maxPairs: cap });
+        ovZ.begin(); ovZ.collectSweptPairs(currTree, curr, curr, N); ovZ.end();
+        const setZero = drainSet(ovZ, eA, eB);
+        if (!sameSet(setDiscrete, setZero)) {
+            h.fail(TIER, 'zero-motion swept != discrete (' + setDiscrete.size + ' vs ' + setZero.size + ')', {});
+        }
+
+        // Zero-alloc swept traversal: 200k collects, maxArrayBuffersGrowth:0.
+        const ov = createOverlap({ maxPairs: cap });
+        const zA = new Int32Array(cap), zB = new Int32Array(cap);
+        const hotS = () => {
+            ov.begin();
+            ov.collectSweptPairs(sweptTree, prev, curr, N);
+            ov.end();
+            ov.drainEnter(zA, zB);
+        };
+        hotS();   // pre-warm the one-time stack sizing.
+        const OPS = 200000, WARMUP = 2000;
+        const { report, summary } = h.runOpsGate(hotS, { ops: OPS, warmup: WARMUP });
+        const bpo = h.bytesPerOp(hotS, OPS);
+        if (!report.ok) {
+            h.fail(TIER, 'collectSweptPairs grew a buffer over ' + OPS + ' collects: verdict=' +
+                report.verdict + ' violations=' + JSON.stringify(report.violations) +
+                ' major=' + summary.gc.major + ' bytes/op=' + bpo.toFixed(3), {});
         }
     }
 }

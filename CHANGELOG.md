@@ -3,6 +3,65 @@
 All notable changes to `@zakkster/lite-overlap` are documented here.
 The format follows Keep a Changelog; this package adheres to SemVer.
 
+## [1.3.0] - 2026-08-01
+
+Swept detection -- the headline. A projectile moving faster than its own width is
+in front of a thin trigger at frame N and behind it at frame N+1; the overlap
+existed at no sampled instant, and every discrete-sampling trigger system misses
+it. This release tests the swept volume `union(prev, curr)` instead of the
+instantaneous box, so the crossing is caught. It feeds the SAME `add` door and
+enter/stay/exit lifecycle as everything else: a pass-through fires **enter** on
+the crossing frame through the ordinary channel and **exit** the next -- no new
+drain to wire up, no pair silently missed. No new runtime dependency;
+`FORMAT_VERSION` stays `1`. Design of record: `decisions/0004-swept.md`.
+
+### Added
+- **`addSwept(a, prevBoxA, currBoxA, b, prevBoxB, currBoxB)`** -- the manual
+  swept pair door, the swept analog of `add`: supply the two entities' motions,
+  it records the pair iff their swept volumes overlap. The differential oracle for
+  `collectSweptPairs`. Unfiltered by design, like `add` (decision S1).
+- **`collectSweptPairs(tree, prevPacked, currPacked, count)`** -- the bulk swept
+  broadphase. Prunes on a swept-bounding tree (a caller contract: build leaf boxes
+  as `fatten(union(prev, curr))`) and refines each surviving leaf pair with the
+  tight `union(prev, curr)` from the packed motion arrays -- indexed by `userData`,
+  the same rotation-stable keying the O2 filter uses. A leaf `userData >= count`
+  fails closed (decision S4). The O2 filter applies identically.
+- **`sweptOverlap(prevA, currA, prevB, currB)`** -- the pure swept predicate, the
+  swept analog of `narrow`: zero allocation, no table, tree, or import
+  (decision S1).
+
+### Semantics
+- **Swept is a superset of discrete, always** -- the union contains `curr`, so
+  every instantaneous overlap is a swept overlap; no discrete pair is ever lost by
+  using the swept path (decision S3).
+- **Zero motion is bit-identical to discrete.** With `prevPacked === currPacked`
+  the union *is* the current box (`min`/`max` are idempotent and exact in float32),
+  so `collectSweptPairs` reproduces `collectPairs` byte-for-byte (decision S3).
+- **Conservative on diagonal motion** (named precisely): the axis-aligned union
+  over-reports two entities crossing opposite corners of a shared bounding
+  rectangle without their thin diagonal ribbons meeting. Never a missed pair;
+  gate geometry with your own tight boxes as after any broadphase. The exact
+  ribbon test (`sweptOverlapExact`) is deferred (decision S1).
+- **Pass-through fires enter, not a separate event** (decision S2). A separate
+  `drainPass` channel was rejected: a caller who reads only `drainEnter` /
+  `drainExit` would silently miss pass-through hits -- the exact bug this release
+  exists to kill.
+
+### Guarantees held
+- Zero allocation on the swept frame path: both swept unions are register mins/
+  maxes, nothing per pair. Proven by the torture gate (`maxArrayBuffersGrowth: 0`
+  over 200k swept collects) plus a dedicated node:test buffer-growth assertion;
+  the `Set<string>` control still trips the gate.
+- Fail closed on world-scale coordinates (finding A-01): the swept union is
+  strictly larger than both inputs whenever the motion exceeds the local float32
+  ULP; below it the union degenerates to a point-in-time box -- asserted at
+  coordinates 1, 1e3, 1e6, 1e7, with `marginFloor` guidance in the docs
+  (decision S5).
+- 103 tests pass (`node --test`), including the bulk-vs-manual-vs-brute
+  differential, the superset and zero-motion-identity anchors, the committed
+  tunneling fixture (decision S6), the pass-through lifecycle, and the fail-closed
+  range checks.
+
 ## [1.2.0] - 2026-07-31
 
 Layers and filters. The self-traversal from 1.1.0 reported every overlapping
