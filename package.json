@@ -23,10 +23,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --expose-gc --test test/*.test.js",
-    "test:watch": "node --test --watch test/*.test.js",
+    "test": "node --expose-gc --test test/*.test.mjs",
+    "test:watch": "node --test --watch test/*.test.mjs",
     "torture": "node --expose-gc test/torture.mjs",
-    "verify": "npm test && npm run torture"
+    "verify": "npm test && npm run torture",
+    "bench": "node bench/collect-vs-nquery.mjs"
   },
   "keywords": [
     "overlap",

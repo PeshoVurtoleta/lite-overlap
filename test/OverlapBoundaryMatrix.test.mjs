@@ -6,7 +6,7 @@
  * `undefined`, `NaN`, `-0`, duplicate `clear()` ("duplicate dispose"),
  * mutate-during-scan analogues ("dispose-during-iteration"), re-entrant
  * `begin()` ("re-entrant write"), and adversarial cases the O0 planner did
- * not enumerate. This file does not replace `Overlap.test.js` / the torture
+ * not enumerate. This file does not replace `Overlap.test.mjs` / the torture
  * tiers -- it fills gaps they leave (short out-buffers, maxPairs=1, duplicate
  * clear, invalid-id inputs, out-of-protocol call order).
  *

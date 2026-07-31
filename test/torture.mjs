@@ -5,19 +5,24 @@
  *
  *     node --expose-gc test/torture.mjs        -> prints "ok", exit 0
  *
- * Tiers, sharing the lite-aabb / lite-bvh tier shape. Wired for O0 --
+ * Tiers, sharing the lite-aabb / lite-bvh tier shape --
  *
+ *     T0  metamorphic laws (O1: insert-order / id-relabel / motion invariance,
+ *         dup-userData fail-closed)
  *     T1  degenerate table states (empty / single / full / self-pair guard)
+ *     T3  adversarial open-addressing (mined collision chain, pinned probe bound,
+ *         backward-shift healing)
+ *     T4  capacity exhaustion (atomic over-cap throw) + full-load churn + the
+ *         traversal-stack boundary (smallest tree, all-identical clique)
  *     T5  differential fuzz against the Set<string> oracle
  *     T6  zero-alloc GC budget (maxMajor:0 / maxPauseMs:4 / maxArrayBuffersGrowth:0)
  *     T7  soak + conservation (4096 build/teardown cycles)
+ *     T8  cross-package (bvh-driven traversal vs oracle, O1)
  *     T9  controls -- every gate has a broken variant that must exit non-zero
  *
- * Registered but empty, filled by O1-O3 --
+ * Registered but empty, filled by O2-O3 --
  *
- *     T0  metamorphic laws
  *     T2  aliasing matrix
- *     T8  cross-package (bvh-driven)
  *
  * Tiers run STRICTLY SEQUENTIALLY: lite-gc-profiler allows one measurement at a
  * time. Never run two tiers at once.
@@ -41,6 +46,8 @@ import * as h from './torture/harness.mjs';
 import * as t0 from './torture/t0-laws.mjs';
 import * as t1 from './torture/t1-degenerate.mjs';
 import * as t2 from './torture/t2-aliasing.mjs';
+import * as t3 from './torture/t3-hashing.mjs';
+import * as t4 from './torture/t4-capacity.mjs';
 import * as t5 from './torture/t5-fuzz.mjs';
 import * as t6 from './torture/t6-alloc.mjs';
 import * as t7 from './torture/t7-soak.mjs';
@@ -51,6 +58,8 @@ const TIERS = [
     ['T0-laws', t0.run],
     ['T1-degenerate', t1.run],
     ['T2-aliasing', t2.run],
+    ['T3-hashing', t3.run],
+    ['T4-capacity', t4.run],
     ['T5-fuzz', t5.run],
     ['T6-alloc', t6.run],
     ['T7-soak', t7.run],

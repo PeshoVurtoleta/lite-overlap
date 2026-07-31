@@ -1,7 +1,7 @@
 /**
  * @zakkster/lite-overlap -- unit tests (Node built-in test runner).
  *
- *   npm test            # node --expose-gc --test test/*.test.js
+ *   npm test            # node --expose-gc --test test/*.test.mjs
  *
  * Every O0 ASSERTION from the ROADMAP is a concrete test here. The centrepiece
  * is a Set<string> oracle differential over 10k+ seeded frames: the naive
