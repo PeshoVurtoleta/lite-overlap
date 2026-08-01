@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="SWEEP // LINE: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Scene 01 PAIRS + scene 03 TRAVERSE, driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
+<meta name="description" content="SWEEP // LINE: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Scene 01 PAIRS + scene 02 SWEEP + scene 03 TRAVERSE, driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
 <title>SWEEP // LINE - lite-overlap</title>
 <script type="importmap">
 { "imports": {
@@ -203,6 +203,28 @@
     .note { font: 400 11px/1.5 var(--sans); color: var(--text-dim); }
     .note code { font-family: var(--mono); color: var(--text-mut); }
     .warn { color: var(--warn); }
+
+    /* scene 02 fixture table -- the committed tunneling rows, marks filled by the library */
+    .fx { width: 100%; border-collapse: collapse; font: 400 11px/1.3 var(--mono); font-variant-numeric: tabular-nums; }
+    .fx th { color: var(--text-dim); font-weight: 600; text-align: right; padding: 3px 6px 5px; border-bottom: 1px solid var(--line); letter-spacing: 0.04em; }
+    .fx th.c, .fx td.c { text-align: center; }
+    .fx td { text-align: right; padding: 4px 6px; color: var(--text-mut); border-bottom: 1px solid var(--line-soft); }
+    .fx tbody tr { cursor: pointer; }
+    @media (hover: hover) { .fx tbody tr:hover td { background: color-mix(in oklab, var(--steady) 9%, transparent); } }
+    .fx tbody tr.on td { background: color-mix(in oklab, var(--warn) 15%, transparent); color: var(--text); }
+    .fx .hit { color: var(--good); font-weight: 600; }
+    .fx .miss { color: var(--exit); font-weight: 600; }
+
+    /* scene 04 layer matrix -- a clickable LxL grid, cells lit when the layer pair interacts */
+    .mask { display: grid; gap: 3px; margin: 2px 0; }
+    .mask .cell { width: 100%; aspect-ratio: 1 / 1; border-radius: 3px; background: var(--line-soft); border: 1px solid var(--line); cursor: pointer; }
+    .mask .cell.on { background: color-mix(in oklab, var(--steady) 55%, var(--panel-2)); border-color: color-mix(in oklab, var(--steady) 40%, var(--line)); }
+    .mask .cell.diag { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--warn) 55%, transparent); }
+    @media (hover: hover) { .mask .cell:hover { border-color: var(--steady); } }
+    .legend { display: flex; flex-wrap: wrap; gap: 5px 11px; margin-top: 9px; }
+    .legend .lg { display: flex; align-items: center; gap: 5px; font: 400 10px/1 var(--mono); color: var(--text-mut); }
+    .legend .sw { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+
     [hidden] { display: none !important; }
 </style>
 
@@ -216,9 +238,9 @@
 
 <div id="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="true" data-scene="01">01 &middot; PAIRS</button>
-    <button class="tab" role="tab" disabled data-scene="02">02 &middot; SWEEP <small>O3</small></button>
+    <button class="tab" role="tab" aria-selected="false" data-scene="02">02 &middot; SWEEP <small>O3</small></button>
     <button class="tab" role="tab" aria-selected="false" data-scene="03">03 &middot; TRAVERSE</button>
-    <button class="tab" role="tab" disabled data-scene="04">04 &middot; MASKS <small>O2</small></button>
+    <button class="tab" role="tab" aria-selected="false" data-scene="04">04 &middot; MASKS <small>O2</small></button>
 </div>
 
 <main>
@@ -232,6 +254,16 @@
             BVH as nested boxes &middot; play or step the descent.
             <u>amber</u> = node vs itself &middot; <s>cyan</s> = descend &middot;
             <b>mint</b> = leaf pair found &middot; <i>rose</i> = pruned.
+        </div>
+        <div class="stageHint" id="hint02" hidden>
+            same shot, two detectors &middot; <b>DISCRETE</b> samples the instant,
+            <b>SWEPT</b> tests the volume. Push <u>speed</u> up or the <u>wall</u> thin
+            and the top projectile <i>tunnels</i> &mdash; no flash. Swept still catches.
+        </div>
+        <div class="stageHint" id="hint04" hidden>
+            entities coloured by layer &middot; a line joins a pair only if their
+            layers interact. Toggle the <s>matrix</s> and pairs vanish &mdash;
+            <b>results identical</b> stays green.
         </div>
     </div>
 
@@ -292,6 +324,82 @@
                 Every counter is checkable headlessly: this drives the real
                 <code>createOverlap()</code> at <b>0&nbsp;B/frame</b>. Flip the toggle and
                 the heap grows teeth &mdash; the GC counter is the gate, on stage.
+            </div>
+        </div>
+
+        <!-- ================= scene 02 SWEEP ================= -->
+        <div id="aside02" hidden>
+            <div class="card">
+                <h2>discrete &mdash; samples the instant</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">shots</div><div class="v" id="dShots">0</div></div>
+                    <div class="stat"><div class="k">caught</div><div class="v enter" id="dHits">0</div></div>
+                    <div class="stat"><div class="k">tunneled</div><div class="v exit" id="dTun">0</div></div>
+                    <div class="stat"><div class="k">miss rate</div><div class="v" id="dRate">0%</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>swept &mdash; tests the volume</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">shots</div><div class="v" id="wShots">0</div></div>
+                    <div class="stat"><div class="k">caught</div><div class="v enter" id="wHits">0</div></div>
+                    <div class="stat"><div class="k">tunneled</div><div class="v enter" id="wTun">0</div></div>
+                    <div class="stat"><div class="k">miss rate</div><div class="v" id="wRate">0%</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">THIS CONFIG</span>
+                    <span class="pill idle" id="cfgPill">-</span>
+                </div>
+                <div class="note">
+                    speed <code id="cfgSpeed">-</code>, wall <code id="cfgThick">-</code>:
+                    discrete <b id="cfgDisc">-</b> &middot; swept <b id="cfgSwept">-</b>.
+                    Below the boundary both catch; past it discrete tunnels.
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">VERIFIED vs LIBRARY</span>
+                    <span class="pill idle" id="vPill">-</span>
+                </div>
+                <table class="fx" id="fxTable">
+                    <thead><tr><th>px/frame</th><th>wall</th><th class="c">discrete</th><th class="c">swept</th></tr></thead>
+                    <tbody>
+                        <tr data-speed="40" data-thick="60"><td>40</td><td>60</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                        <tr data-speed="120" data-thick="8"><td>120</td><td>8</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                        <tr data-speed="200" data-thick="4"><td>200</td><td>4</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                        <tr data-speed="400" data-thick="6"><td>400</td><td>6</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                        <tr data-speed="900" data-thick="10"><td>900</td><td>10</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                        <tr data-speed="1500" data-thick="2"><td>1500</td><td>2</td><td class="c" data-col="d">-</td><td class="c" data-col="s">-</td></tr>
+                    </tbody>
+                </table>
+                <div class="note" style="margin-top:9px">
+                    the committed fixture, replayed live through <code>sweptOverlap</code>,
+                    <code>addSwept</code> and <code>collectSweptPairs</code> &mdash; all three
+                    must agree. The marks are the library's answer, not the demo's.
+                    Click a row to load it.
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>scene</h2>
+                <div class="field">
+                    <label>projectile speed <b id="spOut">120 px/frame</b></label>
+                    <input type="range" id="spSlider" min="20" max="1500" step="10" value="120">
+                </div>
+                <div class="field">
+                    <label>wall thickness <b id="thOut">8 px</b></label>
+                    <input type="range" id="thSlider" min="2" max="60" step="1" value="8">
+                </div>
+                <div class="note" style="margin-top:10px">
+                    a trigger you can shoot through is a bug &mdash; the swept lane fires
+                    <b style="color:var(--enter)">enter</b> on the crossing frame through
+                    the ordinary channel, no new event to wire.
+                </div>
             </div>
         </div>
 
@@ -358,6 +466,60 @@
                     <button class="themeBtn" id="tReplayBtn" type="button">replay</button>
                 </div>
                 <div class="note" style="margin-top:10px" id="tStatus">traversing...</div>
+            </div>
+        </div>
+
+        <!-- ================= scene 04 MASKS ================= -->
+        <div id="aside04" hidden>
+            <div class="card">
+                <h2>filtering &mdash; cost down, results identical</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">all pairs</div><div class="v" id="mAll">0</div></div>
+                    <div class="stat"><div class="k">after filter</div><div class="v accent" id="mFilt">0</div></div>
+                    <div class="stat"><div class="k">blocked</div><div class="v exit" id="mBlock">0</div></div>
+                    <div class="stat"><div class="k">blocked %</div><div class="v" id="mPct">0%</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">RESULTS IDENTICAL</span>
+                    <span class="pill idle" id="mPill">-</span>
+                </div>
+                <div class="note">
+                    the filtered set equals the unfiltered set post-filtered in JS,
+                    compared pair-for-pair every frame via the real
+                    <code>collectPairs</code> with the layer matrix live. Filtering
+                    changes cost, never results &mdash; the light is the O2 gate, on stage.
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>layer matrix &mdash; click to toggle</h2>
+                <div class="mask" id="maskGrid"></div>
+                <div class="legend" id="maskLegend"></div>
+                <div class="note" style="margin-top:9px">
+                    symmetric by construction &mdash; toggling (a,&thinsp;b) toggles (b,&thinsp;a).
+                    Rows and columns are layers 0..<b id="mLmax">5</b>; the library
+                    matrix spans 0..31.
+                </div>
+                <div class="btnRow">
+                    <button class="themeBtn" id="mAllBtn" type="button">all on</button>
+                    <button class="themeBtn" id="mDiagBtn" type="button">diagonal only</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>scene</h2>
+                <div class="field">
+                    <label>entities <b id="mNOut">360</b></label>
+                    <input type="range" id="mNSlider" min="60" max="600" step="20" value="360">
+                </div>
+                <div class="note" style="margin-top:10px">
+                    keyed by <code>userData</code>, so the filter survives BVH
+                    rotations &mdash; a per-node cached mask would silently go stale on
+                    the next refit, so this package does not keep one.
+                </div>
             </div>
         </div>
     </aside>
@@ -1110,10 +1272,564 @@ const Scene03 = (() => {
 })();
 
 /* =======================================================================
+   SCENE 02 -- SWEEP  (the O3 headline, made visceral)
+   Two lanes, ONE shot: same projectile, same wall, same speed. DISCRETE (top)
+   samples the instantaneous box; SWEPT (bottom) tests union(prev, curr). Push
+   the speed up or the wall thin and the top projectile sails through with no
+   flash -- TUNNELED -- while the bottom lane keeps catching. Detection on every
+   shot is the REAL library: overlap.narrow / overlap.addSwept drive the two
+   lifecycles (a catch is a genuine ENTER, exactly what a caller sees). A cold
+   gate replays the committed tunneling fixture through sweptOverlap, addSwept
+   AND collectSweptPairs on a 2-leaf swept-bounding tree, so the table's marks
+   are the library's answer, asserted against the committed columns -- the demo
+   checks the library, it does not echo it. Every buffer is allocated once.
+   ======================================================================= */
+const Scene02 = (() => {
+    const $aside = document.getElementById('aside02');
+    const $hint = document.getElementById('hint02');
+
+    const $dShots = document.getElementById('dShots');
+    const $dHits = document.getElementById('dHits');
+    const $dTun = document.getElementById('dTun');
+    const $dRate = document.getElementById('dRate');
+    const $wShots = document.getElementById('wShots');
+    const $wHits = document.getElementById('wHits');
+    const $wTun = document.getElementById('wTun');
+    const $wRate = document.getElementById('wRate');
+    const $cfgPill = document.getElementById('cfgPill');
+    const $cfgSpeed = document.getElementById('cfgSpeed');
+    const $cfgThick = document.getElementById('cfgThick');
+    const $cfgDisc = document.getElementById('cfgDisc');
+    const $cfgSwept = document.getElementById('cfgSwept');
+    const $vPill = document.getElementById('vPill');
+    const $spSlider = document.getElementById('spSlider');
+    const $spOut = document.getElementById('spOut');
+    const $thSlider = document.getElementById('thSlider');
+    const $thOut = document.getElementById('thOut');
+    const $fxTable = document.getElementById('fxTable');
+
+    /* ---- fixed geometry: the committed fixture's frame (fixture units) --- */
+    const WALL_X = 500, PW = 6;               // wall left-x; projectile width
+    const PY0 = 40, PY1 = 60, WH = 100;       // projectile y-band inside the [0,100]-tall wall
+    const FIELD_X1 = 720;                     // drawn world width; wall sits ~69% across
+    const START_RIGHT = WALL_X - 20;          // projectile right edge, pre-move (fixture)
+    const EXIT_X = FIELD_X1 + 60;             // world-x a projectile has fully left the field
+    const PROJ = 0, WALL = 1;                 // userData ids
+
+    /* ---- committed tunneling fixture (mirrors test/OverlapSwept.test.mjs) */
+    const FX_SPEED = new Int32Array([40, 120, 200, 400, 900, 1500]);
+    const FX_THICK = new Int32Array([60, 8, 4, 6, 10, 2]);
+    const FX_DISC = new Int32Array([1, 0, 0, 0, 0, 0]);   // committed discrete column
+    const FX_SWEPT = new Int32Array([1, 1, 1, 1, 1, 1]);  // committed swept column
+    const FX_N = FX_SPEED.length;
+
+    /* ---- real library instances, allocated ONCE ----------------------- */
+    const discOv = createOverlap({ maxPairs: 4 });   // discrete lifecycle (hot)
+    const swOv = createOverlap({ maxPairs: 4 });     // swept lifecycle (hot)
+    const gate = createOverlap({ maxPairs: 4 });     // cold: predicate + door + narrow
+    const gBulk = createOverlap({ maxPairs: 4 });    // cold: collectSweptPairs
+    const gTree = new DynamicBVH2D(8);               // cold: 2-leaf swept-bounding tree
+
+    /* ---- preallocated boxes / buffers --------------------------------- */
+    const wall = new Float32Array(4);
+    const projPrev = new Float32Array(4);
+    const projCurr = new Float32Array(4);
+    const eA = new Int32Array(4), eB = new Int32Array(4);
+    const gWall = new Float32Array(4), gPrev = new Float32Array(4), gCurr = new Float32Array(4);
+    const gFat = new Float32Array(4);
+    const gPrevPacked = new Float32Array(8), gCurrPacked = new Float32Array(8);
+
+    /* ---- scene state (scalars only; the frame path allocates nothing) -- */
+    let speed = 120, thick = 8;
+    let shotClock = 0, travel = 20, period = 60;
+    let shotDHit = false, shotSHit = false;   // outcome of the in-flight shot
+    let dShots = 0, dHits = 0, dTun = 0;
+    let wShots = 0, wHits = 0, wTun = 0;
+    let entered = false, primed = false;
+
+    let padX = 24, sxScale = 1, laneH = 1;
+    function fit() { padX = 24; sxScale = (W - 2 * padX) / FIELD_X1; laneH = H / 2; }
+    function lx(wx) { return padX + wx * sxScale; }
+
+    function setBoxes(w, pp, pc, sp, th) {
+        w[0] = WALL_X; w[1] = 0; w[2] = WALL_X + th; w[3] = WH;
+        pp[0] = START_RIGHT - PW; pp[1] = PY0; pp[2] = START_RIGHT; pp[3] = PY1;
+        pc[0] = pp[0] + sp; pc[1] = PY0; pc[2] = pp[2] + sp; pc[3] = PY1;
+    }
+    function unionInto(o, a, b) {
+        o[0] = Math.min(a[0], b[0]); o[1] = Math.min(a[1], b[1]);
+        o[2] = Math.max(a[2], b[2]); o[3] = Math.max(a[3], b[3]);
+    }
+    // Brute swept-union overlap, hand-rolled in JS -- the independent oracle.
+    function bruteSwept(pp, pc, w) {
+        const ax0 = Math.min(pp[0], pc[0]), ay0 = Math.min(pp[1], pc[1]);
+        const ax1 = Math.max(pp[2], pc[2]), ay1 = Math.max(pp[3], pc[3]);
+        return ax0 <= w[2] && w[0] <= ax1 && ay0 <= w[3] && w[1] <= ay1;
+    }
+
+    /* ---- fire one shot: REAL detection through both lifecycles --------- */
+    function fireShot() {
+        setBoxes(wall, projPrev, projCurr, speed, thick);
+
+        // DISCRETE: a discrete system sees only the sampled instants (start / end
+        // of the step). narrow() is the tight box test; add() drives the lifecycle,
+        // so a catch is a genuine ENTER -- and a fast, thin case samples on both
+        // sides of the wall and misses it entirely.
+        discOv.clear(); discOv.begin();
+        if (discOv.narrow(projPrev, wall) || discOv.narrow(projCurr, wall)) discOv.add(PROJ, WALL);
+        discOv.end();
+        shotDHit = discOv.drainEnter(eA, eB) > 0;
+
+        // SWEPT: addSwept records iff the swept volume overlaps. The pass-through
+        // fires ENTER on this crossing frame through the ordinary channel (S2).
+        swOv.clear(); swOv.begin();
+        swOv.addSwept(PROJ, projPrev, projCurr, WALL, wall, wall);
+        swOv.end();
+        shotSHit = swOv.drainEnter(eA, eB) > 0;
+
+        dShots++; if (shotDHit) dHits++; else dTun++;
+        wShots++; if (shotSHit) wHits++; else wTun++;
+
+        // pacing: a faster config flies in fewer frames (visible velocity), then holds
+        travel = Math.max(2, Math.min(90, Math.round(26000 / speed)));
+        period = travel + 40;
+        shotClock = 0;
+    }
+
+    /* ---- draw one lane ------------------------------------------------- */
+    function drawLane(top, isSwept, hit) {
+        const cyv = top + laneH * 0.5;
+        const bandH = Math.min(46, laneH * 0.34);
+        const y0 = cyv - bandH * 0.5, y1 = cyv + bandH * 0.5;
+        const wx0 = lx(WALL_X), ww = Math.max(2, lx(WALL_X + thick) - wx0);
+        const flashT = shotClock <= travel ? (hit ? 0.28 : 0) : (1 - (shotClock - travel) / (period - travel));
+
+        if (isSwept) {
+            // the swept volume: the union box that was actually tested
+            const rx0 = lx(projPrev[0]), rx1 = Math.min(lx(EXIT_X), lx(projCurr[2]));
+            vctx.fillStyle = COL.enter; vctx.globalAlpha = 0.14;
+            vctx.fillRect(rx0, y0, Math.max(2, rx1 - rx0), y1 - y0);
+            vctx.globalAlpha = 1;
+        } else {
+            // the two sampled instants, as hollow ghosts -- the wall sits in the gap
+            vctx.strokeStyle = COL.text; vctx.globalAlpha = 0.55; vctx.lineWidth = 1;
+            vctx.strokeRect(lx(projPrev[0]) + 0.5, y0 + 0.5, Math.max(2, lx(projPrev[2]) - lx(projPrev[0])), y1 - y0);
+            const c0 = lx(projCurr[0]);
+            if (c0 < lx(EXIT_X)) vctx.strokeRect(c0 + 0.5, y0 + 0.5, Math.max(2, lx(projCurr[2]) - c0), y1 - y0);
+            vctx.globalAlpha = 1;
+        }
+
+        // wall: dark base, mint flash only if THIS lane caught the shot
+        vctx.fillStyle = COL.node; vctx.globalAlpha = 0.9;
+        vctx.fillRect(wx0, y0 - 7, ww, (y1 - y0) + 14);
+        if (hit && flashT > 0) {
+            vctx.fillStyle = COL.enter; vctx.globalAlpha = 0.2 + 0.55 * flashT;
+            vctx.fillRect(wx0, y0 - 7, ww, (y1 - y0) + 14);
+        }
+        vctx.globalAlpha = 1;
+
+        // projectile: slides entry -> exit; a caught lane impacts (clamps at) the wall
+        const travP = shotClock < travel ? shotClock / travel : 1;
+        let wx = 40 + (EXIT_X - 40) * travP;
+        if (hit && wx > WALL_X) wx = WALL_X;
+        const bw = Math.max(3, PW * sxScale);
+        const offRight = !hit && wx >= EXIT_X - 1;
+        if (!offRight) {
+            vctx.fillStyle = hit ? COL.steady : COL.exit;
+            vctx.globalAlpha = (!hit && wx > WALL_X) ? 0.5 : 1;
+            vctx.fillRect(lx(wx), cyv - bandH * 0.3, bw, bandH * 0.6);
+            vctx.globalAlpha = 1;
+        }
+
+        // labels
+        vctx.font = '600 11px "SF Mono", ui-monospace, monospace';
+        vctx.fillStyle = COL.text;
+        vctx.fillText(isSwept ? 'SWEPT' : 'DISCRETE', 14, top + 20);
+        if (!hit && shotClock > travel) {
+            vctx.fillStyle = COL.exit;
+            vctx.fillText('TUNNELED', wx0 + 12, y0 - 12);
+        }
+    }
+
+    function draw() {
+        vctx.clearRect(0, 0, W, H);
+        vctx.strokeStyle = COL.grid; vctx.lineWidth = 1;
+        vctx.beginPath(); vctx.moveTo(0, laneH); vctx.lineTo(W, laneH); vctx.stroke();
+        drawLane(0, false, shotDHit);
+        drawLane(laneH, true, shotSHit);
+    }
+
+    function publish() {
+        $dShots.textContent = dShots; $dHits.textContent = dHits; $dTun.textContent = dTun;
+        $wShots.textContent = wShots; $wHits.textContent = wHits; $wTun.textContent = wTun;
+        $dRate.textContent = dShots ? Math.round(dTun / dShots * 100) + '%' : '0%';
+        $wRate.textContent = wShots ? Math.round(wTun / wShots * 100) + '%' : '0%';
+        $dTun.className = 'v ' + (dTun > 0 ? 'exit' : 'enter');
+    }
+
+    /* ---- live per-config readout (cold; on slider / row change) -------- */
+    function refreshConfig() {
+        setBoxes(gWall, gPrev, gCurr, speed, thick);
+        const d = gate.narrow(gPrev, gWall) || gate.narrow(gCurr, gWall);
+        const s = gate.sweptOverlap(gPrev, gCurr, gWall, gWall);
+        $cfgSpeed.textContent = speed + ' px/frame';
+        $cfgThick.textContent = thick + ' px';
+        $cfgDisc.textContent = d ? 'hit' : 'tunnels';
+        $cfgDisc.style.color = d ? 'var(--enter)' : 'var(--exit)';
+        $cfgSwept.textContent = s ? 'hit' : 'MISS';
+        $cfgSwept.style.color = s ? 'var(--enter)' : 'var(--exit)';
+        const tunnels = s && !d;
+        $cfgPill.textContent = tunnels ? 'TUNNELS' : (d && s ? 'both catch' : '-');
+        $cfgPill.className = 'pill ' + (tunnels ? 'hot' : (d && s ? 'zero' : 'idle'));
+        highlightRow();
+    }
+
+    function highlightRow() {
+        const rows = $fxTable.tBodies[0].rows;
+        for (let r = 0; r < FX_N; r++) {
+            rows[r].className = (FX_SPEED[r] === speed && FX_THICK[r] === thick) ? 'on' : '';
+        }
+    }
+
+    /* ---- cold gate: replay the committed fixture through the library --- */
+    function runFixtureGate() {
+        const rows = $fxTable.tBodies[0].rows;
+        let pass = 0;
+        for (let r = 0; r < FX_N; r++) {
+            const sp = FX_SPEED[r], th = FX_THICK[r];
+            setBoxes(gWall, gPrev, gCurr, sp, th);
+
+            // (1) pure predicate
+            const sPred = gate.sweptOverlap(gPrev, gCurr, gWall, gWall);
+            // (2) manual door -- records iff swept overlap, read as an enter
+            gate.clear(); gate.begin();
+            gate.addSwept(PROJ, gPrev, gCurr, WALL, gWall, gWall);
+            gate.end();
+            const sDoor = gate.drainEnter(eA, eB) > 0;
+            // (3) bulk collectSweptPairs on a 2-leaf swept-bounding tree.
+            // Leaf boxes must BOUND the motion (S4): the projectile leaf is the
+            // fattened union; the wall is static. Packed arrays are userData-indexed.
+            unionInto(gFat, gPrev, gCurr);
+            gFat[0] -= 1; gFat[1] -= 1; gFat[2] += 1; gFat[3] += 1;
+            gTree.clear();
+            gTree.insertLeaf(gFat, PROJ);
+            gTree.insertLeaf(gWall, WALL);
+            gPrevPacked.set(gPrev, PROJ * 4); gPrevPacked.set(gWall, WALL * 4);
+            gCurrPacked.set(gCurr, PROJ * 4); gCurrPacked.set(gWall, WALL * 4);
+            gBulk.clear(); gBulk.begin();
+            gBulk.collectSweptPairs(gTree, gPrevPacked, gCurrPacked, 2);
+            gBulk.end();
+            const sBulk = gBulk.pairCount() > 0;
+
+            // discrete + brute swept oracle
+            const dHit = gate.narrow(gPrev, gWall) || gate.narrow(gCurr, gWall);
+            const sBrute = bruteSwept(gPrev, gCurr, gWall);
+
+            const swept = sPred;
+            const agree = (sPred === sDoor) && (sPred === sBulk) && (sPred === sBrute);
+            const rowOk = agree && (swept === (FX_SWEPT[r] === 1)) && (dHit === (FX_DISC[r] === 1));
+            if (rowOk) pass++;
+
+            // table marks are the LIBRARY's answer (the bulk path), not committed constants
+            const tr = rows[r];
+            const dc = tr.querySelector('[data-col="d"]');
+            const sc = tr.querySelector('[data-col="s"]');
+            dc.textContent = dHit ? 'hit' : 'tunnels'; dc.className = 'c ' + (dHit ? 'hit' : 'miss');
+            sc.textContent = sBulk ? 'hit' : 'MISS'; sc.className = 'c ' + (sBulk ? 'hit' : 'miss');
+        }
+        $vPill.textContent = pass + ' / ' + FX_N;
+        $vPill.className = 'pill ' + (pass === FX_N ? 'zero' : 'hot');
+        if (pass !== FX_N && typeof console !== 'undefined') {
+            console.warn('scene02 fixture gate:', pass, '/', FX_N, '-- library disagrees with the committed columns');
+        }
+    }
+
+    /* ---- controls (wired once) ---------------------------------------- */
+    $spSlider.addEventListener('input', () => { speed = +$spSlider.value; $spOut.textContent = speed + ' px/frame'; refreshConfig(); });
+    $thSlider.addEventListener('input', () => { thick = +$thSlider.value; $thOut.textContent = thick + ' px'; refreshConfig(); });
+    $fxTable.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr[data-speed]');
+        if (!tr) return;
+        speed = +tr.dataset.speed; thick = +tr.dataset.thick;
+        $spSlider.value = speed; $thSlider.value = thick;
+        $spOut.textContent = speed + ' px/frame'; $thOut.textContent = thick + ' px';
+        refreshConfig();
+    });
+
+    return {
+        id: '02',
+        enter() {
+            $aside.hidden = false; $hint.hidden = false;
+            if (!entered) { runFixtureGate(); entered = true; }
+            refreshConfig();
+            fireShot();                  // one shot in flight immediately
+        },
+        exit() { $aside.hidden = true; $hint.hidden = true; },
+        onResize() {
+            fit();
+            // prime the lanes + counters once on open (the enter() shot is already
+            // in flight), so nothing waits on the first rAF tick.
+            if (!primed && W >= 64 && H >= 64) { draw(); publish(); primed = true; }
+        },
+        frame() {
+            if (W < 64 || H < 64) return;
+            shotClock++;
+            if (shotClock >= period) fireShot();
+            draw();
+            if ((shotClock & 7) === 0) publish();
+        },
+    };
+})();
+
+/* =======================================================================
+   SCENE 04 -- MASKS  (the O2 gate, running on stage)
+   Entities coloured by layer drift over a real DynamicBVH2D rebuilt each frame.
+   TWO library instances collect the SAME tree: ovAll (identity) yields every
+   candidate pair; ovFilt (the live layer matrix) yields the filtered subset.
+   Every frame the filtered set is compared PAIR-FOR-PAIR against ovAll's set
+   post-filtered in JS by the same matrix -- the O2 "filtering changes cost, not
+   results" invariant, asserted on stage. The comparison is allocation-free:
+   pack each canonical pair into one int, sort two preallocated typed arrays in
+   place, walk them once. Because the filter is keyed by userData it survives the
+   BVH's per-frame rebuild/rotations -- a per-node cached mask could not.
+   ======================================================================= */
+const Scene04 = (() => {
+    const $aside = document.getElementById('aside04');
+    const $hint = document.getElementById('hint04');
+    const $all = document.getElementById('mAll');
+    const $filt = document.getElementById('mFilt');
+    const $block = document.getElementById('mBlock');
+    const $pct = document.getElementById('mPct');
+    const $pill = document.getElementById('mPill');
+    const $grid = document.getElementById('maskGrid');
+    const $legend = document.getElementById('maskLegend');
+    const $nSlider = document.getElementById('mNSlider');
+    const $nOut = document.getElementById('mNOut');
+    const $allBtn = document.getElementById('mAllBtn');
+    const $diagBtn = document.getElementById('mDiagBtn');
+    document.getElementById('mLmax').textContent = '5';
+
+    /* ---- fixed capacity, allocated ONCE ------------------------------- */
+    const M_MAXN = 600;
+    const L = 6;                              // demo layers (library matrix spans 32)
+    const M_MAXNODES = 2 * M_MAXN + 16;       // bvh node cap (>= 2N-1)
+    const MAX_PAIRS = 1 << 14;                // 16384 -- above demo density
+    const PACK = 8192;                        // key = a*PACK + b  (N < PACK, fits int32)
+    // 6 distinct layer hues (viewport is always dark, so fixed hex is fine)
+    const PALETTE = ['#e0607f', '#e0a24f', '#d7d24a', '#5fd68a', '#4fb4e4', '#a07ce0'];
+
+    const posX = new Float64Array(M_MAXN), posY = new Float64Array(M_MAXN);
+    const velX = new Float64Array(M_MAXN), velY = new Float64Array(M_MAXN);
+    const layer = new Int32Array(M_MAXN);
+    const box = new Float32Array(4);
+    const leafId = new Int32Array(M_MAXN);
+
+    const tree = new DynamicBVH2D(M_MAXNODES);
+    const ovAll = createOverlap({ maxPairs: MAX_PAIRS });    // identity (no setLayer -> unfiltered)
+    const ovFilt = createOverlap({ maxPairs: MAX_PAIRS });   // the live layer matrix
+
+    const allA = new Int32Array(MAX_PAIRS), allB = new Int32Array(MAX_PAIRS);
+    const filtA = new Int32Array(MAX_PAIRS), filtB = new Int32Array(MAX_PAIRS);
+    const expKeys = new Int32Array(MAX_PAIRS), libKeys = new Int32Array(MAX_PAIRS);
+
+    // local mirror of the 6x6 interaction matrix as bitmask rows (all-on = identity)
+    const rows = new Int32Array(L);
+    const cells = [];                          // DOM cells, row-major [i*L + j]
+
+    /* ---- scene state -------------------------------------------------- */
+    let N = 360, half = 6, frame = 0;
+    let nAll = 0, nFilt = 0, blocked = 0, gateOk = true;
+    let seeded = false, built = false, primed = false;
+
+    function interact(i, j) { return (rows[i] >>> j) & 1; }
+    // In-place ascending sort of the first n entries. Replaces `arr.subarray(0,n)
+    // .sort()`, whose subarray() allocates a fresh view object every call -- this
+    // runs each frame, so that would be steady-state garbage. n is small at demo
+    // densities (tens to low hundreds), so insertion sort is comfortably cheap.
+    function sortRange(a, n) {
+        for (let i = 1; i < n; i++) {
+            const v = a[i]; let k = i - 1;
+            while (k >= 0 && a[k] > v) { a[k + 1] = a[k]; k--; }
+            a[k + 1] = v;
+        }
+    }
+
+    /* ---- deterministic seeding ---------------------------------------- */
+    let seed = 0x51a7c0de >>> 0;
+    function rnd() { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; }
+    function spawn(i) {
+        posX[i] = rnd() * Math.max(1, W);
+        posY[i] = rnd() * Math.max(1, H);
+        const a = rnd() * Math.PI * 2, s = 0.4 + rnd() * 0.8;
+        velX[i] = Math.cos(a) * s; velY[i] = Math.sin(a) * s;
+    }
+    function reseed() {
+        seed = 0x51a7c0de >>> 0;
+        for (let i = 0; i < M_MAXN; i++) { spawn(i); layer[i] = i % L; }
+        // ovFilt learns each entity's layer (this flips its filter latch on)
+        for (let i = 0; i < N; i++) ovFilt.setLayer(i, layer[i]);
+        seeded = true;
+    }
+    function boxHalfFor(n) { return Math.max(3, Math.round(9 - n / 120)); }
+
+    /* ---- matrix wiring ------------------------------------------------ */
+    // set one symmetric cell in BOTH the local mirror and ovFilt, refresh DOM
+    function setCell(i, j, on) {
+        if (on) { rows[i] |= (1 << j); rows[j] |= (1 << i); }
+        else { rows[i] &= ~(1 << j); rows[j] &= ~(1 << i); }
+        ovFilt.setInteract(i, j, on);          // library sets (i,j) and (j,i) too
+        paintCell(i, j); paintCell(j, i);
+    }
+    function paintCell(i, j) {
+        const c = cells[i * L + j];
+        c.className = 'cell' + (interact(i, j) ? ' on' : '') + (i === j ? ' diag' : '');
+    }
+    function buildMatrixDom() {
+        $grid.style.gridTemplateColumns = 'repeat(' + L + ', 1fr)';
+        for (let i = 0; i < L; i++) {
+            for (let j = 0; j < L; j++) {
+                const c = document.createElement('div');
+                c.dataset.i = i; c.dataset.j = j;
+                cells[i * L + j] = c;
+                $grid.appendChild(c);
+            }
+        }
+        $grid.addEventListener('click', (e) => {
+            const c = e.target.closest('.cell'); if (!c) return;
+            const i = +c.dataset.i, j = +c.dataset.j;
+            setCell(i, j, !interact(i, j));
+            refresh();
+        });
+        for (let k = 0; k < L; k++) {
+            const lg = document.createElement('span'); lg.className = 'lg';
+            const sw = document.createElement('span'); sw.className = 'sw';
+            sw.style.background = PALETTE[k];
+            lg.appendChild(sw); lg.appendChild(document.createTextNode('layer ' + k));
+            $legend.appendChild(lg);
+        }
+    }
+    function paintAll() { for (let i = 0; i < L; i++) for (let j = 0; j < L; j++) paintCell(i, j); }
+    // recompute + republish immediately after a matrix edit, so the counts and
+    // gate light respond on the click rather than waiting for the next rAF tick.
+    function refresh() { if (seeded) { step(); draw(); publish(); } }
+
+    /* ---- per-frame simulation (zero allocation) ----------------------- */
+    function step() {
+        frame++;
+        half = boxHalfFor(N);
+        const w = W, h = H;
+        for (let i = 0; i < N; i++) {
+            let x = posX[i] + velX[i], y = posY[i] + velY[i];
+            if (x < half) { x = half; velX[i] = -velX[i]; } else if (x > w - half) { x = w - half; velX[i] = -velX[i]; }
+            if (y < half) { y = half; velY[i] = -velY[i]; } else if (y > h - half) { y = h - half; velY[i] = -velY[i]; }
+            posX[i] = x; posY[i] = y;
+        }
+
+        // rebuild the tree from tight boxes (margin 0: fat == tight here)
+        tree.clear();
+        for (let i = 0; i < N; i++) {
+            box[0] = posX[i] - half; box[1] = posY[i] - half;
+            box[2] = posX[i] + half; box[3] = posY[i] + half;
+            leafId[i] = tree.insertLeaf(box, i);
+        }
+
+        // identity collect -> every candidate pair
+        ovAll.clear(); ovAll.begin(); ovAll.collectPairs(tree); ovAll.end();
+        nAll = ovAll.drainEnter(allA, allB);
+        // filtered collect (the live matrix) -> the subset the library keeps
+        ovFilt.clear(); ovFilt.begin(); ovFilt.collectPairs(tree); ovFilt.end();
+        nFilt = ovFilt.drainEnter(filtA, filtB);
+
+        // O2 GATE: filtered set must equal all-set post-filtered in JS, pair-for-pair.
+        let j = 0;
+        for (let k = 0; k < nAll; k++) {
+            const a = allA[k], b = allB[k];
+            if (interact(layer[a], layer[b])) expKeys[j++] = a * PACK + b;
+        }
+        for (let k = 0; k < nFilt; k++) libKeys[k] = filtA[k] * PACK + filtB[k];
+        sortRange(expKeys, j);
+        sortRange(libKeys, nFilt);
+        let ok = (j === nFilt);
+        if (ok) for (let k = 0; k < nFilt; k++) { if (expKeys[k] !== libKeys[k]) { ok = false; break; } }
+        gateOk = ok;
+        blocked = nAll - nFilt;
+    }
+
+    function draw() {
+        vctx.clearRect(0, 0, W, H);
+        // filtered pairs as faint lines
+        vctx.strokeStyle = COL.steady; vctx.globalAlpha = 0.22; vctx.lineWidth = 1;
+        vctx.beginPath();
+        for (let k = 0; k < nFilt; k++) {
+            const a = filtA[k], b = filtB[k];
+            vctx.moveTo(posX[a], posY[a]); vctx.lineTo(posX[b], posY[b]);
+        }
+        vctx.stroke();
+        vctx.globalAlpha = 1;
+        // entities, coloured by layer
+        const sz = Math.max(2, half);
+        for (let i = 0; i < N; i++) {
+            vctx.fillStyle = PALETTE[layer[i]];
+            vctx.fillRect(posX[i] - sz * 0.5, posY[i] - sz * 0.5, sz, sz);
+        }
+    }
+
+    function publish() {
+        $all.textContent = nAll;
+        $filt.textContent = nFilt;
+        $block.textContent = blocked;
+        $pct.textContent = nAll ? Math.round(blocked / nAll * 100) + '%' : '0%';
+        $pill.textContent = gateOk ? 'identical' : 'MISMATCH';
+        $pill.className = 'pill ' + (gateOk ? 'zero' : 'hot');
+        if (!gateOk && typeof console !== 'undefined') console.warn('scene04 O2 gate MISMATCH: filtered', nFilt, 'expected', $filt.textContent);
+    }
+
+    /* ---- controls (wired once) ---------------------------------------- */
+    $nSlider.addEventListener('input', () => {
+        N = +$nSlider.value; $nOut.textContent = N;
+        for (let i = 0; i < N; i++) ovFilt.setLayer(i, layer[i]);  // ensure new ids are keyed
+    });
+    $allBtn.addEventListener('click', () => { for (let i = 0; i < L; i++) for (let j = i; j < L; j++) setCell(i, j, true); refresh(); });
+    $diagBtn.addEventListener('click', () => { for (let i = 0; i < L; i++) for (let j = i; j < L; j++) setCell(i, j, i === j); refresh(); });
+
+    // init matrix all-on (identity) in both mirror and library
+    function initMatrix() {
+        const full = (1 << L) - 1;
+        for (let i = 0; i < L; i++) rows[i] = full;   // local mirror all-on
+        // library defaults all-on already; no setInteract needed until a toggle
+        paintAll();
+    }
+    buildMatrixDom();
+    initMatrix();
+
+    return {
+        id: '04',
+        enter() {
+            $aside.hidden = false; $hint.hidden = false;
+            built = true;
+        },
+        exit() { $aside.hidden = true; $hint.hidden = true; },
+        onResize() {
+            if (!seeded && W >= 64 && H >= 64) reseed();
+            // prime the readouts once on open, so the gate light and counts show
+            // real values immediately rather than waiting on the first rAF tick.
+            if (seeded && !primed) { step(); draw(); publish(); primed = true; }
+        },
+        frame() {
+            if (!built || !seeded) { if (W >= 64 && H >= 64) reseed(); if (!seeded) return; }
+            step(); draw();
+            if ((frame & 7) === 0) publish();
+        },
+    };
+})();
+
+/* =======================================================================
    BOOT
    ======================================================================= */
 scenes['01'] = Scene01;
+scenes['02'] = Scene02;
 scenes['03'] = Scene03;
+scenes['04'] = Scene04;
 
 document.getElementById('themeBtn').addEventListener('click', () => {
     const cur = document.documentElement.getAttribute('data-theme');
