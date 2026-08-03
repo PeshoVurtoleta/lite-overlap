@@ -3,6 +3,44 @@
 All notable changes to `@zakkster/lite-overlap` are documented here.
 The format follows Keep a Changelog; this package adheres to SemVer.
 
+## [1.4.0] - 2026-08-03
+
+The exact swept recheck, and a decision made with a bench rather than a guess.
+`0004-swept.md` shipped the swept volume as the AABB `union(prev, curr)` -- a sound
+broadphase that never misses, but one that over-reports on diagonal motion (the
+union is the bounding rectangle of a thin diagonal ribbon). It named the exact
+ribbon test `sweptOverlapExact` and deferred it, pending a bench. This release ran
+that bench (`bench/swept-union-vs-hull.mjs`, gated against an independent
+Sutherland-Hodgman clip oracle): the union over-reports up to ~55% on fast diagonal
+motion, but the exact hull test costs ~4-5x per pair. So the exact test ships as an
+**opt-in predicate** -- the exact analog of `narrow` -- not as the broadphase
+default: the union stays the never-miss candidate source, and the caller reaches
+for exactness on the pairs it cares about. Pure addition; no new dependency;
+`FORMAT_VERSION` stays `1`; no hot path touched. Design of record:
+`decisions/0005-swept-exact.md`.
+
+### Added
+- **`sweptOverlapExact(prevA, currA, prevB, currB)`** -- the exact opt-in swept
+  tightener. Tests the true swept ribbons (the convex hull of each box's 8 swept
+  corners) via SAT on the four hull edge normals `{x, y, perp(motionA),
+  perp(motionB)}`, dropping the union's diagonal over-report. A strict **subset**
+  of `sweptOverlap` on any input; **equal** to it under axis-aligned motion; reduces
+  to `narrow` under zero motion. Fails closed on any non-finite or malformed box,
+  exactly as `narrow` / `sweptOverlap` do. Zero allocation, no table, tree, or
+  import -- the exact analog of `narrow` for swept volumes.
+- **`narrow` and `sweptOverlap` are now top-level named exports** as well as
+  instance methods. They (and `sweptOverlapExact`) are pure predicates, so they are
+  usable standalone: `import { narrow } from '@zakkster/lite-overlap'`.
+
+### Fixed
+- **`import { narrow }` (and `sweptOverlap`) now resolves.** The README and
+  `llms.txt` documented these pure predicates as importable, but they were
+  instance-methods-only, so `import { narrow }` threw
+  `does not provide an export named 'narrow'`. They are now genuine named exports;
+  `ov.narrow === narrow` (the instance method is the exported function, so existing
+  `ov.narrow(...)` callers are unaffected). A named-export regression test now
+  guards the surface.
+
 ## [1.3.0] - 2026-08-01
 
 Swept detection -- the headline. A projectile moving faster than its own width is

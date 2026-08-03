@@ -44,7 +44,7 @@
  */
 
 /** Package version. Keep in sync with package.json and llms.txt (three-place sync). */
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 /**
  * The version of the shared FORMAT contract (see @zakkster/lite-aabb FORMAT.md),
@@ -93,6 +93,191 @@ function nextPow2(n) {
     n |= n >> 8;
     n |= n >> 16;
     return (n + 1) >>> 0;
+}
+
+/**
+ * O3.1 -- SAT support helper for `sweptOverlapExact` (decision 0005). Do the
+ * swept hulls of A and B OVERLAP along axis `(nx, ny)`?
+ *
+ * Each swept hull is the convex hull of a box's 8 corners (4 prev + 4 curr), so
+ * its projection onto `(nx, ny)` is the min/max over the two boxes' four-corner
+ * projections -- folded here in registers, no array, no hull point-list, no
+ * sort. Phrased as a POSITIVE per-axis overlap `aMax >= bMin && bMax >= aMin`
+ * (touching counts, `>=`, mirroring `narrow`'s `<=`), NOT the negation of a
+ * separation. That is the fail-closed form: on a NaN-tainted projection (a
+ * corrupt or short box read yields NaN) every `>=` is false, so the axis is
+ * false, so the four-axis AND in `sweptOverlapExact` is false -- an unverified
+ * box reports NO overlap, exactly as `narrow` / `sweptOverlap` do (Law: fail
+ * closed on every unverified state). `!(aMax<bMin || bMax<aMin)` equals this for
+ * all FINITE inputs, so geometry and the strict-subset contract are unchanged;
+ * only the NaN case flips from fail-open to fail-closed.
+ *
+ * A zero-length axis (the `perp` of a still box's zero motion) projects every
+ * corner to 0, so `0 >= 0 && 0 >= 0` is true (non-separating) -- correct (a
+ * still box contributes no ribbon-side normal) and needs no explicit skip. SAT
+ * is scale-invariant, so the axis is NOT normalized (no divide, no sqrt).
+ * Register-only; module scope, so no per-call closure is created.
+ * Algorithmically identical to `axisOverlap` in `bench/swept-union-vs-hull.mjs`
+ * so that bench stays a faithful cost/behavior proxy for the shipped predicate.
+ *
+ * @param {number} nx axis x component (unnormalized).
+ * @param {number} ny axis y component (unnormalized).
+ * @param {Float32Array} pA A's tight prev box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} cA A's tight curr box.
+ * @param {Float32Array} pB B's tight prev box.
+ * @param {Float32Array} cB B's tight curr box.
+ * @returns {boolean} whether the two hulls overlap along `(nx, ny)` (touching counts).
+ */
+function sweptAxisOverlap(nx, ny, pA, cA, pB, cB) {
+    // Hull A: min/max of dot over the 8 corners = min/max over the two boxes.
+    const aPMin = (nx >= 0 ? nx * pA[0] : nx * pA[2]) + (ny >= 0 ? ny * pA[1] : ny * pA[3]);
+    const aPMax = (nx >= 0 ? nx * pA[2] : nx * pA[0]) + (ny >= 0 ? ny * pA[3] : ny * pA[1]);
+    const aCMin = (nx >= 0 ? nx * cA[0] : nx * cA[2]) + (ny >= 0 ? ny * cA[1] : ny * cA[3]);
+    const aCMax = (nx >= 0 ? nx * cA[2] : nx * cA[0]) + (ny >= 0 ? ny * cA[3] : ny * cA[1]);
+    // Math.min/max, NOT a ternary: they PROPAGATE NaN (a ternary `a < b ? a : b`
+    // drops a NaN operand, letting a corrupt corner in prev OR curr leak past this
+    // axis and fail OPEN). NaN-propagation is what makes the predicate fail closed
+    // on any unverified corner, matching narrow / sweptOverlap; byte-identical to
+    // the ternary on finite inputs, so the finite subset stays exact.
+    const aMin = Math.min(aPMin, aCMin);
+    const aMax = Math.max(aPMax, aCMax);
+    // Hull B.
+    const bPMin = (nx >= 0 ? nx * pB[0] : nx * pB[2]) + (ny >= 0 ? ny * pB[1] : ny * pB[3]);
+    const bPMax = (nx >= 0 ? nx * pB[2] : nx * pB[0]) + (ny >= 0 ? ny * pB[3] : ny * pB[1]);
+    const bCMin = (nx >= 0 ? nx * cB[0] : nx * cB[2]) + (ny >= 0 ? ny * cB[1] : ny * cB[3]);
+    const bCMax = (nx >= 0 ? nx * cB[2] : nx * cB[0]) + (ny >= 0 ? ny * cB[3] : ny * cB[1]);
+    const bMin = Math.min(bPMin, bCMin);
+    const bMax = Math.max(bPMax, bCMax);
+    return aMax >= bMin && bMax >= aMin;
+}
+
+/**
+ * O1 -- the TIGHT recheck (decision E2). Pure boolean AABB overlap of two
+ * caller-supplied TIGHT boxes, each a `Float32Array(4)`
+ * `[minX, minY, maxX, maxY]`. Zero allocation, does NOT touch the tree,
+ * imports nothing (a caller need not pull in lite-aabb for the one
+ * predicate).
+ *
+ * WHY THE CALLER'S BOXES, not the tree's: `collectPairs` reports FAT-bound
+ * pairs (conservative broadphase) because bvh stores only FATTENED boxes
+ * (`bboxes` / `getBounds` are the fat box, never the caller's original
+ * tight box). A recheck reading tree data would re-ask the SAME fat
+ * predicate -- always true for a reported pair, filtering nothing. The
+ * tight boxes exist only where they were created: with the caller, before
+ * fattening. So the caller passes them here for a pair it cares about.
+ *
+ * @param {Float32Array} boxA tight box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} boxB tight box `[minX, minY, maxX, maxY]`.
+ * @returns {boolean} whether the two tight boxes overlap (touching counts).
+ */
+export function narrow(boxA, boxB) {
+    return boxA[0] <= boxB[2] && boxB[0] <= boxA[2] &&
+        boxA[1] <= boxB[3] && boxB[1] <= boxA[3];
+}
+
+/**
+ * O3 -- the pure swept predicate (decision S1). Whether the swept volume
+ * of A (the AABB union of its prev and curr tight boxes) overlaps the swept
+ * volume of B. Zero allocation, no table, no tree, no import -- the
+ * primitive `addSwept` and `collectSweptPairs` are both built on, and the
+ * swept analog of `narrow`.
+ *
+ * CONSERVATISM (S1): the union is the tightest AXIS-ALIGNED box containing
+ * the whole linear sweep, so it never misses a real swept overlap but
+ * over-reports on diagonal motion (two entities crossing opposite corners
+ * of a shared bounding rectangle without their thin diagonal ribbons
+ * meeting still report). The exact ribbon test now EXISTS as the opt-in
+ * recheck `sweptOverlapExact` (decision 0005) -- an exact SUBSET of this
+ * predicate; call it, or recheck geometry with your own tight boxes,
+ * before acting, as after any broadphase.
+ *
+ * @param {Float32Array} prevA tight box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} currA tight box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} prevB tight box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} currB tight box `[minX, minY, maxX, maxY]`.
+ * @returns {boolean} whether the two swept volumes overlap (touching counts).
+ */
+export function sweptOverlap(prevA, currA, prevB, currB) {
+    const aMinX = Math.min(prevA[0], currA[0]);
+    const aMinY = Math.min(prevA[1], currA[1]);
+    const aMaxX = Math.max(prevA[2], currA[2]);
+    const aMaxY = Math.max(prevA[3], currA[3]);
+    const bMinX = Math.min(prevB[0], currB[0]);
+    const bMinY = Math.min(prevB[1], currB[1]);
+    const bMaxX = Math.max(prevB[2], currB[2]);
+    const bMaxY = Math.max(prevB[3], currB[3]);
+    return aMinX <= bMaxX && bMinX <= aMaxX &&
+        aMinY <= bMaxY && bMinY <= aMaxY;
+}
+
+/**
+ * O3.1 -- the EXACT opt-in swept tightener (decision 0005). The exact
+ * analog of `narrow` for swept volumes, and the exact recheck for
+ * `sweptOverlap`: whether the true swept RIBBONS of A and B overlap, not
+ * their axis-aligned unions. The swept ribbon of an axis-aligned box
+ * translating prev->curr is the convex hull of its 8 corners (4 prev, 4
+ * curr) -- a hexagon under diagonal motion, the union rectangle under
+ * axis-aligned motion. Two ribbons overlap iff no separating axis exists
+ * among the four hull edge normals {x=(1,0), y=(0,1), perp(motionA),
+ * perp(motionB)}; SAT on exactly those axes is exact for hull-vs-hull.
+ *
+ * CONTRACT: a strict SUBSET of `sweptOverlap` -- it NEVER reports a pair
+ * `sweptOverlap` would not (the ribbon is contained in the union), so
+ * `sweptOverlapExact(...) => sweptOverlap(...)` always. EQUAL to
+ * `sweptOverlap` under axis-aligned motion (the hull IS the union
+ * rectangle then). Touching counts (`<=`, matching `narrow` and
+ * `sweptOverlap`).
+ *
+ * OPT-IN, not the broadphase default: the S1 union stays the never-miss
+ * candidate source for `collectSweptPairs` / `addSwept`. The decision
+ * bench (bench/swept-union-vs-hull.mjs) measured the union over-reporting
+ * up to ~55 percent on fast diagonal motion but the exact hull costing
+ * ~5x the union per pair -- too much to spend on every broadphase
+ * candidate, worth it as a targeted recheck. So this ships as the exact
+ * analog of `narrow`, called by hand on the pairs you care about.
+ *
+ * FAIL CLOSED (Law): the test is an AND of positive per-axis overlaps, so
+ * a NaN from a corrupt or short box read poisons the AND to `false` -- an
+ * unverified box reports NO overlap, exactly as `narrow` / `sweptOverlap`
+ * do. It never reports a phantom hit on unverified state, which also keeps
+ * the strict-subset contract intact on any input. This extends to
+ * NON-FINITE coordinates: an `Infinity` box component makes a SAT
+ * projection `0 * Infinity = NaN`, so a non-finite box also fails closed
+ * here -- unlike `narrow` / `sweptOverlap`, whose pure comparisons tolerate
+ * `Infinity` and can report `true`. Because exact is always a SUBSET of
+ * `sweptOverlap`, failing closed where the union reports overlap is
+ * contract-valid; real entity AABBs are finite, so this never arises in
+ * practice.
+ *
+ * Zero allocation: the 8 corner projections are folded in registers via
+ * `sweptAxisOverlap`, no array, no hull list, no sort, no scratch box, no
+ * import. Axes are NOT normalized (SAT is scale-invariant); a zero-motion
+ * axis projects every corner to 0 and overlaps trivially, so it needs no
+ * divide and no explicit skip.
+ *
+ * @param {Float32Array} prevA A's tight prev box `[minX, minY, maxX, maxY]`.
+ * @param {Float32Array} currA A's tight curr box.
+ * @param {Float32Array} prevB B's tight prev box.
+ * @param {Float32Array} currB B's tight curr box.
+ * @returns {boolean} whether the two swept ribbons overlap (touching counts).
+ */
+export function sweptOverlapExact(prevA, currA, prevB, currB) {
+    // Motion = min-corner displacement (register-only). For a rigid
+    // translation every corner displaces identically, so this IS the
+    // translation vector -- byte-identical to the center delta on any
+    // finite box, and a static box (prev === curr) keeps its well-defined
+    // zero motion rather than a center delta's Inf - Inf = NaN.
+    const mAx = currA[0] - prevA[0];
+    const mAy = currA[1] - prevA[1];
+    const mBx = currB[0] - prevB[0];
+    const mBy = currB[1] - prevB[1];
+    // SAT as an AND of per-axis overlaps over the four hull edge normals:
+    // overlap iff EVERY axis overlaps. A NaN makes an axis false -> false
+    // (fail closed), matching narrow / sweptOverlap.
+    return sweptAxisOverlap(1, 0, prevA, currA, prevB, currB) &&
+        sweptAxisOverlap(0, 1, prevA, currA, prevB, currB) &&
+        sweptAxisOverlap(-mAy, mAx, prevA, currA, prevB, currB) &&
+        sweptAxisOverlap(-mBy, mBx, prevA, currA, prevB, currB);
 }
 
 /**
@@ -733,63 +918,11 @@ export function createOverlap(options) {
             }
         },
 
-        /**
-         * O1 -- the TIGHT recheck (decision E2). Pure boolean AABB overlap of two
-         * caller-supplied TIGHT boxes, each a `Float32Array(4)`
-         * `[minX, minY, maxX, maxY]`. Zero allocation, does NOT touch the tree,
-         * imports nothing (a caller need not pull in lite-aabb for the one
-         * predicate).
-         *
-         * WHY THE CALLER'S BOXES, not the tree's: `collectPairs` reports FAT-bound
-         * pairs (conservative broadphase) because bvh stores only FATTENED boxes
-         * (`bboxes` / `getBounds` are the fat box, never the caller's original
-         * tight box). A recheck reading tree data would re-ask the SAME fat
-         * predicate -- always true for a reported pair, filtering nothing. The
-         * tight boxes exist only where they were created: with the caller, before
-         * fattening. So the caller passes them here for a pair it cares about.
-         *
-         * @param {Float32Array} boxA tight box `[minX, minY, maxX, maxY]`.
-         * @param {Float32Array} boxB tight box `[minX, minY, maxX, maxY]`.
-         * @returns {boolean} whether the two tight boxes overlap (touching counts).
-         */
-        narrow(boxA, boxB) {
-            return boxA[0] <= boxB[2] && boxB[0] <= boxA[2] &&
-                boxA[1] <= boxB[3] && boxB[1] <= boxA[3];
-        },
+        narrow,
 
-        /**
-         * O3 -- the pure swept predicate (decision S1). Whether the swept volume
-         * of A (the AABB union of its prev and curr tight boxes) overlaps the swept
-         * volume of B. Zero allocation, no table, no tree, no import -- the
-         * primitive `addSwept` and `collectSweptPairs` are both built on, and the
-         * swept analog of `narrow`.
-         *
-         * CONSERVATISM (S1): the union is the tightest AXIS-ALIGNED box containing
-         * the whole linear sweep, so it never misses a real swept overlap but
-         * over-reports on diagonal motion (two entities crossing opposite corners
-         * of a shared bounding rectangle without their thin diagonal ribbons
-         * meeting still report). The exact ribbon test (`sweptOverlapExact`) is
-         * deferred; recheck geometry with your own tight boxes before acting, as
-         * after any broadphase.
-         *
-         * @param {Float32Array} prevA tight box `[minX, minY, maxX, maxY]`.
-         * @param {Float32Array} currA tight box `[minX, minY, maxX, maxY]`.
-         * @param {Float32Array} prevB tight box `[minX, minY, maxX, maxY]`.
-         * @param {Float32Array} currB tight box `[minX, minY, maxX, maxY]`.
-         * @returns {boolean} whether the two swept volumes overlap (touching counts).
-         */
-        sweptOverlap(prevA, currA, prevB, currB) {
-            const aMinX = Math.min(prevA[0], currA[0]);
-            const aMinY = Math.min(prevA[1], currA[1]);
-            const aMaxX = Math.max(prevA[2], currA[2]);
-            const aMaxY = Math.max(prevA[3], currA[3]);
-            const bMinX = Math.min(prevB[0], currB[0]);
-            const bMinY = Math.min(prevB[1], currB[1]);
-            const bMaxX = Math.max(prevB[2], currB[2]);
-            const bMaxY = Math.max(prevB[3], currB[3]);
-            return aMinX <= bMaxX && bMinX <= aMaxX &&
-                aMinY <= bMaxY && bMinY <= aMaxY;
-        },
+        sweptOverlap,
+
+        sweptOverlapExact,
 
         /**
          * O3 -- the manual swept pair door (decision S1). The swept analog of

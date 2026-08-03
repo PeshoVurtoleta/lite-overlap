@@ -9,7 +9,7 @@
 > to `@zakkster/lite-bvh` and `@zakkster/lite-aabb` (same `FORMAT_VERSION` buffer
 > contract; no runtime dependency, format agreement only).
 
-Version `1.3.0`. Named exports: `createOverlap`, `VERSION`, `FORMAT_VERSION`.
+Version `1.4.0`. Named exports: `createOverlap`, `narrow`, `sweptOverlap`, `sweptOverlapExact`, `VERSION`, `FORMAT_VERSION`.
 
 `FORMAT_VERSION` (integer, currently `1`) is the shared buffer-contract version.
 `@zakkster/lite-aabb` and `@zakkster/lite-bvh` export the identical constant; a
@@ -138,6 +138,18 @@ function narrow(boxA: Float32Array, boxB: Float32Array): boolean;   // [minX,min
 // Conservative (over-reports on diagonal motion, never misses); zero allocation.
 function sweptOverlap(prevA: Float32Array, currA: Float32Array,
                      prevB: Float32Array, currB: Float32Array): boolean;
+
+// The EXACT opt-in swept tightener -- the exact analog of narrow, and the exact
+// recheck for sweptOverlap. Tests the true swept RIBBONS (convex hull of each
+// box's 8 swept corners) via SAT, not their axis-aligned unions, so it drops the
+// diagonal over-report (a bench measured the union over-reporting up to ~55% on
+// fast diagonal motion). A strict SUBSET of sweptOverlap; EQUAL to it under
+// axis-aligned motion. Costs ~4-5x sweptOverlap per pair, so it is OPT-IN (call it
+// by hand on the pairs you care about), NOT the collectSweptPairs default -- the
+// union stays the never-miss broadphase. Fails closed on any non-finite/malformed
+// box (like narrow). Zero allocation, no import.
+function sweptOverlapExact(prevA: Float32Array, currA: Float32Array,
+                          prevB: Float32Array, currB: Float32Array): boolean;
 
 // The readonly BVH view collectPairs reads (a @zakkster/lite-bvh instance
 // satisfies it as-is): bboxes (4*maxNodes), children (2*maxNodes, -1/-1 at a

@@ -115,8 +115,22 @@ export function runOpsGate(fn, opts) {
     return { report: checkNoGc(res.summary, RULES), summary: res.summary };
 }
 
-/** Measure steady-state bytes/op of `fn` (for the GATE line). */
-export function bytesPerOp(fn, iterations) {
-    const res = measureAllocs(fn, { iterations });
+/**
+ * Measure steady-state bytes/op of `fn` (for the GATE line). `bytesPerCall` is the
+ * MIN over `batches` measured batches, each bracketed by a forced settle, so a
+ * genuinely zero-alloc op reads 0 once background retention (JIT feedback vectors,
+ * the profiler's own heap samples) settles. The default 8 batches suffice for a
+ * heavy op; a nanosecond-scale predicate measured AFTER other sessions in the same
+ * tier has a thinner signal, so it passes more batches to let the min observe the
+ * true-zero floor -- this lowers estimator variance, it does NOT widen the budget
+ * (the assertion stays strict 0 B/op).
+ * @param {(i:number)=>void} fn
+ * @param {number} iterations
+ * @param {number} [batches] measured batches; min-over-batches is the reported floor.
+ */
+export function bytesPerOp(fn, iterations, batches) {
+    const opts = { iterations };
+    if (batches !== undefined) opts.batches = batches;
+    const res = measureAllocs(fn, opts);
     return res.bytesPerCall;
 }

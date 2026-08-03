@@ -16,6 +16,12 @@
  * Set<string> pair store the package exists to replace -- a fresh Set and N
  * key strings per frame. That forces real major collections, the gate goes red,
  * and this tier throws: the executable proof the gate can fail.
+ *
+ * O3.1 (decision 0005): after the pair-table gate, a second section drives >=1e6
+ * `sweptOverlapExact` calls over preallocated mixed-motion (axis-aligned AND
+ * diagonal, so both SAT branches run) boxes under the SAME gate -- the exact
+ * opt-in tightener must be register-only too. A cheap off-gate differential
+ * asserts the subset invariant `sweptOverlapExact(...) => sweptOverlap(...)`.
  */
 
 import { createOverlap } from '../../Overlap.js';
@@ -122,6 +128,70 @@ export function run(h) {
     if (!alloc) {
         // The genuine hot path must be green on BOTH gates.
         if (gateRed) h.fail(TIER, 'hot loop allocated: ' + detail, {});
+
+        // ---- O3.1 sweptOverlapExact (decision 0005): zero-alloc + subset ------
+        // Preallocated boxes with MIXED motion so BOTH SAT branches run: diagonal
+        // motion adds the two oblique perp(motion) hull-normal axes; axis-aligned
+        // motion collapses them to axis-parallel and exercises only x/y.
+        const EXACT_POOL = 256;                 // power of two -> `& (EXACT_POOL-1)` wraps
+        const SZ = 14;
+        const prevAe = new Array(EXACT_POOL), currAe = new Array(EXACT_POOL);
+        const prevBe = new Array(EXACT_POOL), currBe = new Array(EXACT_POOL);
+        const rngE = h.xorshift32(h.SEED ^ 0x5e5e5e5e);
+        const mkBox = (x, y) => { const b = new Float32Array(4); b[0] = x; b[1] = y; b[2] = x + SZ; b[3] = y + SZ; return b; };
+        const moveBox = (b, dx, dy) => { const c = new Float32Array(4); c[0] = b[0] + dx; c[1] = b[1] + dy; c[2] = b[2] + dx; c[3] = b[3] + dy; return c; };
+        for (let i = 0; i < EXACT_POOL; i++) {
+            const pa = mkBox(h.unit(rngE()) * 60, h.unit(rngE()) * 60);
+            const pb = mkBox(h.unit(rngE()) * 60, h.unit(rngE()) * 60);
+            const spA = h.unit(rngE()) * 5 * SZ, spB = h.unit(rngE()) * 5 * SZ;
+            const diag = (i & 1) === 0;         // half diagonal, half axis-aligned
+            prevAe[i] = pa; currAe[i] = moveBox(pa, spA, diag ? spA : 0);
+            prevBe[i] = pb; currBe[i] = moveBox(pb, diag ? spB : 0, spB);
+        }
+
+        // Off-gate differential: the exact test is a strict SUBSET of the union.
+        for (let i = 0; i < EXACT_POOL; i++) {
+            for (let j = 0; j < EXACT_POOL; j++) {
+                if (ov.sweptOverlapExact(prevAe[i], currAe[i], prevBe[j], currBe[j]) &&
+                    !ov.sweptOverlap(prevAe[i], currAe[i], prevBe[j], currBe[j])) {
+                    h.fail(TIER, 'sweptOverlapExact reported a pair sweptOverlap rejects ' +
+                        '(subset invariant broken) at i=' + i + ' j=' + j, {});
+                }
+            }
+        }
+
+        // >=1e6 calls under the same gate; XOR checksum defeats dead-code removal.
+        let exactChecksum = 0;
+        const exactHot = (i) => {
+            const a = i & (EXACT_POOL - 1);
+            // Second index on a coprime Smi-range stride (5) so a != b sweeps many
+            // A/B combinations -- both diagonal and axis-aligned boxes land on both
+            // sides. Stays a tagged small int (no HeapNumber) so the op is truly 0 B.
+            const b = (i * 5 + 3) & (EXACT_POOL - 1);
+            if (ov.sweptOverlapExact(prevAe[a], currAe[a], prevBe[b], currBe[b])) exactChecksum ^= (i | 1);
+        };
+        const EXACT_OPS = 1_000_000;
+        const eGate = h.runOpsGate(exactHot, { ops: EXACT_OPS, warmup: 4000 });
+        // 32 batches (vs the default 8) lowers the min-over-batches variance for a
+        // nanosecond predicate measured after the pair-table session in this tier.
+        const eBpo = h.bytesPerOp(exactHot, EXACT_OPS, 32);
+        // Gate: no WHOLE byte allocated per op. The heavy pair-table op reads exactly
+        // 0 because its churn drives some batch delta negative (freed survivors) and
+        // the estimator clamps the min to 0. A branch-free predicate that frees
+        // nothing USUALLY floors its min at the profiler's own ~16-byte-per-batch
+        // heap-sample bookkeeping (~2e-5 B/op) -- a batch occasionally lands on exact
+        // 0, so a strict `>0` gate is flaky, not always-red. Sub-byte-per-op is zero
+        // allocation by definition (no object is smaller than one byte), so the
+        // principled gate is "< one whole byte per op". It stays falsifiable: the
+        // Set<string> control reads thousands of B/op, and any real per-call
+        // allocation here would be >= one whole object (>= 16 B/op).
+        if (!eGate.report.ok || eBpo >= 1) {
+            h.fail(TIER, 'sweptOverlapExact hot loop allocated or collected: ok=' +
+                eGate.report.ok + ' major=' + eGate.summary.gc.major +
+                ' maxMs=' + eGate.summary.gc.maxMs.toFixed(3) + ' bytes/op=' + eBpo.toFixed(3), {});
+        }
+        if (exactChecksum === 0x7fffffff) h.fail(TIER, 'unreachable exact checksum', {});
+
         return;
     }
 

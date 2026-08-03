@@ -226,8 +226,9 @@ export interface Overlap {
      *
      * **Conservatism (S1):** the union never misses a real swept overlap but
      * over-reports on diagonal motion (the union is the bounding rectangle of the
-     * thin diagonal sweep ribbon). The exact ribbon test is deferred; recheck
-     * geometry with your own tight boxes before acting, as after any broadphase.
+     * thin diagonal sweep ribbon). The exact ribbon test now exists as the opt-in
+     * recheck {@link sweptOverlapExact} (an exact SUBSET of this predicate); call
+     * it, or recheck geometry with your own tight boxes, before acting.
      *
      * @param prevA A's tight prev box `[minX, minY, maxX, maxY]`.
      * @param currA A's tight curr box.
@@ -236,6 +237,39 @@ export interface Overlap {
      * @returns whether the two swept volumes overlap (touching edges count).
      */
     sweptOverlap(
+        prevA: Float32Array,
+        currA: Float32Array,
+        prevB: Float32Array,
+        currB: Float32Array,
+    ): boolean;
+
+    /**
+     * O3.1 -- the EXACT opt-in swept tightener (decision 0005), the exact analog
+     * of {@link narrow} for swept volumes and the exact recheck for
+     * {@link sweptOverlap}. Whether the true swept RIBBONS of A and B overlap
+     * (each ribbon is the convex hull of a box's 8 corners: 4 prev + 4 curr),
+     * tested by SAT on the four hull edge normals `{x, y, perp(motionA),
+     * perp(motionB)}`. Zero allocation; no table, tree, or import.
+     *
+     * **Contract:** a strict SUBSET of {@link sweptOverlap} -- never reports a
+     * pair `sweptOverlap` would not, so `sweptOverlapExact(...) =>
+     * sweptOverlap(...)` always; EQUAL to `sweptOverlap` under axis-aligned
+     * motion (the hull is the union rectangle then). Touching edges count.
+     *
+     * **Opt-in, not the broadphase default:** the S1 union stays the never-miss
+     * source for {@link collectSweptPairs} / {@link addSwept}. The decision bench
+     * measured the union over-reporting up to ~55 percent on fast diagonal motion
+     * but the exact hull costing ~5x the union per pair -- worth it as a targeted
+     * recheck, too much for every broadphase candidate. Call it by hand on the
+     * pairs you care about.
+     *
+     * @param prevA A's tight prev box `[minX, minY, maxX, maxY]`.
+     * @param currA A's tight curr box.
+     * @param prevB B's tight prev box.
+     * @param currB B's tight curr box.
+     * @returns whether the two swept ribbons overlap (touching edges count).
+     */
+    sweptOverlapExact(
         prevA: Float32Array,
         currA: Float32Array,
         prevB: Float32Array,
@@ -366,3 +400,87 @@ export interface Overlap {
  * @throws RangeError if `maxPairs` is not a positive integer.
  */
 export function createOverlap(options: CreateOverlapOptions): Overlap;
+
+/**
+ * O1 -- the TIGHT recheck (decision E2). Pure, zero-allocation boolean AABB
+ * overlap of two caller-supplied **tight** boxes, each a `Float32Array(4)`
+ * `[minX, minY, maxX, maxY]`. Does NOT touch the tree and imports nothing.
+ *
+ * Takes YOUR OWN tight boxes, not the tree's: {@link Overlap.collectPairs}
+ * reports FAT-bound pairs because bvh stores only fattened boxes, so a recheck
+ * reading tree data would re-ask the same fat predicate and filter nothing. The
+ * tight boxes exist only with the caller, before fattening -- pass them here for
+ * a pair {@link Overlap.collectPairs} flagged that you are about to act on.
+ *
+ * Also available as the {@link Overlap.narrow} instance method
+ * (`ov.narrow === narrow`).
+ *
+ * @param boxA tight box `[minX, minY, maxX, maxY]`.
+ * @param boxB tight box `[minX, minY, maxX, maxY]`.
+ * @returns whether the two tight boxes overlap (touching edges count).
+ */
+export function narrow(boxA: Float32Array, boxB: Float32Array): boolean;
+
+/**
+ * O3 -- the pure swept predicate (decision S1), the swept analog of
+ * {@link narrow}. Whether the swept volume of A (the AABB union of its prev and
+ * curr tight boxes) overlaps the swept volume of B. Zero allocation; no table,
+ * tree, or import.
+ *
+ * **Conservatism (S1):** the union never misses a real swept overlap but
+ * over-reports on diagonal motion (the union is the bounding rectangle of the
+ * thin diagonal sweep ribbon). The exact ribbon test exists as the opt-in
+ * recheck {@link sweptOverlapExact} (an exact SUBSET of this predicate); call
+ * it, or recheck geometry with your own tight boxes, before acting.
+ *
+ * Also available as the {@link Overlap.sweptOverlap} instance method
+ * (`ov.sweptOverlap === sweptOverlap`).
+ *
+ * @param prevA A's tight prev box `[minX, minY, maxX, maxY]`.
+ * @param currA A's tight curr box.
+ * @param prevB B's tight prev box.
+ * @param currB B's tight curr box.
+ * @returns whether the two swept volumes overlap (touching edges count).
+ */
+export function sweptOverlap(
+    prevA: Float32Array,
+    currA: Float32Array,
+    prevB: Float32Array,
+    currB: Float32Array,
+): boolean;
+
+/**
+ * O3.1 -- the EXACT opt-in swept tightener (decision 0005), the exact analog
+ * of {@link narrow} for swept volumes and the exact recheck for
+ * {@link sweptOverlap}. Whether the true swept RIBBONS of A and B overlap
+ * (each ribbon is the convex hull of a box's 8 corners: 4 prev + 4 curr),
+ * tested by SAT on the four hull edge normals `{x, y, perp(motionA),
+ * perp(motionB)}`. Zero allocation; no table, tree, or import.
+ *
+ * **Contract:** a strict SUBSET of {@link sweptOverlap} -- never reports a
+ * pair `sweptOverlap` would not, so `sweptOverlapExact(...) =>
+ * sweptOverlap(...)` always; EQUAL to `sweptOverlap` under axis-aligned
+ * motion (the hull is the union rectangle then). Touching edges count.
+ *
+ * **Opt-in, not the broadphase default:** the S1 union stays the never-miss
+ * source for {@link Overlap.collectSweptPairs} / {@link Overlap.addSwept}. The
+ * decision bench measured the union over-reporting up to ~55 percent on fast
+ * diagonal motion but the exact hull costing ~5x the union per pair -- worth it
+ * as a targeted recheck, too much for every broadphase candidate. Call it by
+ * hand on the pairs you care about.
+ *
+ * Also available as the {@link Overlap.sweptOverlapExact} instance method
+ * (`ov.sweptOverlapExact === sweptOverlapExact`).
+ *
+ * @param prevA A's tight prev box `[minX, minY, maxX, maxY]`.
+ * @param currA A's tight curr box.
+ * @param prevB B's tight prev box.
+ * @param currB B's tight curr box.
+ * @returns whether the two swept ribbons overlap (touching edges count).
+ */
+export function sweptOverlapExact(
+    prevA: Float32Array,
+    currA: Float32Array,
+    prevB: Float32Array,
+    currB: Float32Array,
+): boolean;

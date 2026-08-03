@@ -224,13 +224,42 @@ Three properties, all tested:
   and silently miss a hit.
 - **Conservative, not exact.** The axis-aligned union over-reports diagonal motion
   (it is the bounding rectangle of a thin diagonal sweep). Never a missed pair;
-  gate geometry with your own tight boxes via `narrow`, as after any broadphase.
+  gate geometry with your own tight boxes via `narrow` or the exact swept recheck
+  `sweptOverlapExact` (below), as after any broadphase.
 
 `collectSweptPairs(tree, prevPacked, currPacked, count)` has one contract: build
 the tree's leaf boxes to **bound the motion** -- `fatten(union(prev, curr))` -- or
 the descent prunes the tunneling pair before the tight-union refinement can see
 it. The packed prev/curr boxes are indexed by `userData`; a leaf id `>= count`
 fails closed.
+
+### The exact recheck: `sweptOverlapExact`
+
+The union over-reports on diagonal motion, and a bench measured how much: on fast
+diagonal motion it reports **up to ~55%** more pairs than actually sweep through
+each other (two entities crossing opposite corners of a shared bounding rectangle,
+their thin diagonal ribbons never meeting). When that matters,
+`sweptOverlapExact(prevA, currA, prevB, currB)` tests the true swept **ribbons**
+-- the convex hull of each box's eight swept corners -- instead of their unions:
+
+```js
+import { createOverlap, sweptOverlapExact } from '@zakkster/lite-overlap';
+
+// collectSweptPairs / sweptOverlap flagged this pair with the cheap union.
+// Recheck the exact ribbons before you act on it -- like narrow, but swept:
+if (sweptOverlapExact(aPrev, aCurr, bPrev, bCurr)) {
+    // their swept ribbons genuinely overlap
+}
+```
+
+It is the exact analog of `narrow`: a strict **subset** of `sweptOverlap` (it never
+reports a pair the union would not), **equal** to `sweptOverlap` under axis-aligned
+motion, and reduces to `narrow` under zero motion. It costs **~4-5x** the union per
+pair (a bench decided this), so it ships **opt-in** -- the union stays the never-miss
+broadphase default in `collectSweptPairs`, and you call `sweptOverlapExact` by hand
+on the pairs you care about. Like `narrow`, it fails closed on any non-finite or
+malformed box. Zero allocation, no import. Design of record:
+`decisions/0005-swept-exact.md`.
 
 ## How it works
 
@@ -278,7 +307,8 @@ fails closed.
 | `stats()` | `pairCount`, `stayCount`, `capacity`, `loadFactor`, `probeHighWater`, `highWaterMark`, `stackHighWater`, `epoch`. Cold path. |
 | `clear()` | Empty the table without reallocating and without emitting exits. |
 | `narrow(boxA, boxB)` | Tight AABB overlap on two of **your** boxes. Pure boolean, zero alloc. |
-| `sweptOverlap(prevA, currA, prevB, currB)` | The swept analog of `narrow`: do the two swept volumes overlap? Pure boolean, zero alloc. |
+| `sweptOverlap(prevA, currA, prevB, currB)` | The swept analog of `narrow`: do the two swept volumes (unions) overlap? Pure boolean, zero alloc. |
+| `sweptOverlapExact(prevA, currA, prevB, currB)` | The **exact** opt-in swept recheck: do the true swept ribbons (hulls) overlap? A subset of `sweptOverlap`, ~4-5x its cost. Pure boolean, zero alloc. |
 | `VERSION` / `FORMAT_VERSION` | Package semver / shared buffer-contract version (= `1`). |
 
 Full types and per-method contracts are in `Overlap.d.ts`.
@@ -287,7 +317,8 @@ Full types and per-method contracts are in `Overlap.d.ts`.
 
 - **Zero runtime dependencies.** Single ESM file, `sideEffects: false`.
 - **Zero allocation on every frame path** -- `add`, `collectPairs`,
-  `collectSweptPairs`, `end`, the drains, `narrow`, `sweptOverlap`. Proven by a
+  `collectSweptPairs`, `end`, the drains, `narrow`, `sweptOverlap`,
+  `sweptOverlapExact`. Proven by a
   `node --expose-gc` torture gate at `maxMajor: 0` and `maxArrayBuffersGrowth: 0`
   (including 200k swept collects), with a `Set<string>` control that **must fail**
   the gate, so the gate is falsifiable rather than decorative.

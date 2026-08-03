@@ -12,7 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOverlap, VERSION, FORMAT_VERSION } from '../Overlap.js';
+import { createOverlap, VERSION, FORMAT_VERSION, narrow, sweptOverlap, sweptOverlapExact } from '../Overlap.js';
+import * as OverlapNamespace from '../Overlap.js';
 import { FORMAT_VERSION as AABB_FORMAT_VERSION } from '@zakkster/lite-aabb';
 import { FORMAT_VERSION as BVH_FORMAT_VERSION } from '@zakkster/lite-bvh';
 
@@ -39,7 +40,7 @@ function key(a, b) {
 // =============================================================================
 
 test('VERSION is exported and in three-place sync', () => {
-    assert.equal(VERSION, '1.3.0');
+    assert.equal(VERSION, '1.4.0');
 });
 
 test('FORMAT_VERSION conformance: agrees with both peers (decision C1)', () => {
@@ -52,6 +53,104 @@ test('FORMAT_VERSION conformance: agrees with both peers (decision C1)', () => {
         FORMAT_VERSION, BVH_FORMAT_VERSION,
         'FORMAT skew: lite-overlap=' + FORMAT_VERSION + ' lite-bvh=' + BVH_FORMAT_VERSION,
     );
+});
+
+// =============================================================================
+// TOP-LEVEL EXPORT SURFACE -- regression lock (1.3.0 shipped narrow /
+// sweptOverlap / sweptOverlapExact as instance-methods-only, so the README's
+// `import { narrow } from '@zakkster/lite-overlap'` threw at import time. No
+// test covered the import/export surface, so it shipped broken. This block
+// is that test: it fails closed on a missing export AND on an accidental
+// extra one, and proves the standalone and instance forms are the SAME
+// function object, not two implementations that can silently diverge.
+// =============================================================================
+
+test('named export surface is EXACTLY the documented set (regression: 1.3.0 import bug)', () => {
+    const got = Object.keys(OverlapNamespace).sort();
+    const expected = [
+        'FORMAT_VERSION',
+        'VERSION',
+        'createOverlap',
+        'narrow',
+        'sweptOverlap',
+        'sweptOverlapExact',
+    ].sort();
+    assert.deepEqual(got, expected, 'export surface drifted: got ' + JSON.stringify(got));
+});
+
+test('narrow / sweptOverlap / sweptOverlapExact are standalone-callable functions (no instance required)', () => {
+    assert.equal(typeof narrow, 'function');
+    assert.equal(typeof sweptOverlap, 'function');
+    assert.equal(typeof sweptOverlapExact, 'function');
+
+    const overlapA = new Float32Array([0, 0, 10, 10]);
+    const overlapB = new Float32Array([5, 5, 15, 15]);
+    const disjointB = new Float32Array([20, 20, 30, 30]);
+    assert.equal(narrow(overlapA, overlapB), true, 'standalone narrow: overlapping -> true');
+    assert.equal(narrow(overlapA, disjointB), false, 'standalone narrow: disjoint -> false');
+
+    // Static pairs (prev === curr): sweptOverlap/sweptOverlapExact degenerate
+    // to the discrete predicate (decision S3).
+    assert.equal(
+        sweptOverlap(overlapA, overlapA, overlapB, overlapB), true,
+        'standalone sweptOverlap: static overlapping -> true',
+    );
+    assert.equal(
+        sweptOverlap(overlapA, overlapA, disjointB, disjointB), false,
+        'standalone sweptOverlap: static disjoint -> false',
+    );
+    assert.equal(
+        sweptOverlapExact(overlapA, overlapA, overlapB, overlapB), true,
+        'standalone sweptOverlapExact: static overlapping -> true',
+    );
+    assert.equal(
+        sweptOverlapExact(overlapA, overlapA, disjointB, disjointB), false,
+        'standalone sweptOverlapExact: static disjoint -> false',
+    );
+});
+
+test('instance methods ARE the exported functions (ov.narrow === narrow, zero divergence risk)', () => {
+    const ov = createOverlap({ maxPairs: 4 });
+    assert.equal(ov.narrow, narrow, 'ov.narrow is the exact same function object');
+    assert.equal(ov.sweptOverlap, sweptOverlap, 'ov.sweptOverlap is the exact same function object');
+    assert.equal(ov.sweptOverlapExact, sweptOverlapExact, 'ov.sweptOverlapExact is the exact same function object');
+});
+
+test('standalone and instance forms return identical results on the same inputs', () => {
+    const ov = createOverlap({ maxPairs: 4 });
+
+    const boxes = [
+        [new Float32Array([0, 0, 10, 10]), new Float32Array([5, 5, 15, 15])],   // overlapping
+        [new Float32Array([0, 0, 10, 10]), new Float32Array([20, 20, 30, 30])], // disjoint
+    ];
+    for (const [a, b] of boxes) {
+        assert.equal(ov.narrow(a, b), narrow(a, b), 'narrow: instance and standalone agree');
+    }
+
+    const sweeps = [
+        // A moves into B (crossing sweep).
+        [
+            new Float32Array([0, 0, 2, 2]), new Float32Array([8, 0, 10, 2]),
+            new Float32Array([9, 0, 11, 2]), new Float32Array([9, 0, 11, 2]),
+        ],
+        // A and B never come close.
+        [
+            new Float32Array([0, 0, 2, 2]), new Float32Array([2, 0, 4, 2]),
+            new Float32Array([100, 100, 102, 102]), new Float32Array([102, 100, 104, 102]),
+        ],
+    ];
+    for (const [prevA, currA, prevB, currB] of sweeps) {
+        assert.equal(
+            ov.sweptOverlap(prevA, currA, prevB, currB),
+            sweptOverlap(prevA, currA, prevB, currB),
+            'sweptOverlap: instance and standalone agree',
+        );
+        assert.equal(
+            ov.sweptOverlapExact(prevA, currA, prevB, currB),
+            sweptOverlapExact(prevA, currA, prevB, currB),
+            'sweptOverlapExact: instance and standalone agree',
+        );
+    }
 });
 
 // =============================================================================
