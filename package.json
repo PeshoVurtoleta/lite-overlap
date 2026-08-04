@@ -28,7 +28,8 @@
     "torture": "node --expose-gc test/torture.mjs",
     "verify": "npm test && npm run torture",
     "bench": "node bench/collect-vs-nquery.mjs",
-    "bench:swept": "node bench/swept-union-vs-hull.mjs"
+    "bench:swept": "node bench/swept-union-vs-hull.mjs",
+    "bench:subtree": "node bench/subtree-prune-vs-leaf.mjs"
   },
   "keywords": [
     "overlap",

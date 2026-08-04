@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="SWEEP // LINE: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Scene 01 PAIRS + scene 02 SWEEP + scene 03 TRAVERSE, driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
+<meta name="description" content="SWEEP // LINE: overlap is not a set, it is a set of transitions -- and the transitions cost nothing. Scenes PAIRS, SWEEP, TRAVERSE, MASKS and EXACT (the swept union's diagonal over-report, rejected), driven by the real @zakkster/lite-overlap source at zero allocation per frame.">
 <title>SWEEP // LINE - lite-overlap</title>
 <script type="importmap">
 { "imports": {
@@ -241,6 +241,7 @@
     <button class="tab" role="tab" aria-selected="false" data-scene="02">02 &middot; SWEEP <small>O3</small></button>
     <button class="tab" role="tab" aria-selected="false" data-scene="03">03 &middot; TRAVERSE</button>
     <button class="tab" role="tab" aria-selected="false" data-scene="04">04 &middot; MASKS <small>O2</small></button>
+    <button class="tab" role="tab" aria-selected="false" data-scene="05">05 &middot; EXACT <small>O3.1</small></button>
 </div>
 
 <main>
@@ -264,6 +265,12 @@
             entities coloured by layer &middot; a line joins a pair only if their
             layers interact. Toggle the <s>matrix</s> and pairs vanish &mdash;
             <b>results identical</b> stays green.
+        </div>
+        <div class="stageHint" id="hint05" hidden>
+            two boxes on <b>parallel diagonal sweeps</b> &middot; their union boxes
+            <i>overlap</i> but the true swept <b>ribbons</b> miss.
+            <s>sweptOverlap</s> says HIT, <s>sweptOverlapExact</s> says MISS &mdash;
+            the union's diagonal over-report, rejected. Widen the <u>lane gap</u> to find the band.
         </div>
     </div>
 
@@ -522,11 +529,86 @@
                 </div>
             </div>
         </div>
+
+        <!-- ================= scene 05 EXACT ================= -->
+        <div id="aside05" hidden>
+            <div class="card">
+                <h2>union broadphase &mdash; never misses, over-reports</h2>
+                <div class="grid">
+                    <div class="stat"><div class="k">pairs / sweep</div><div class="v" id="xN">0</div></div>
+                    <div class="stat"><div class="k">union hits</div><div class="v" id="xUnion">0</div></div>
+                    <div class="stat"><div class="k">exact confirms</div><div class="v enter" id="xExact">0</div></div>
+                    <div class="stat"><div class="k">over-reported</div><div class="v exit" id="xRej">0</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">OVER-REPORT RATE</span>
+                    <span class="pill idle" id="xRatePill">-</span>
+                </div>
+                <div class="note">
+                    the fraction of union hits the exact ribbon test rejects, at this
+                    angle and speed, over a seeded batch through the real
+                    <code>sweptOverlap</code> / <code>sweptOverlapExact</code>.
+                    Axis-aligned reads <b>0%</b> (the ribbon <i>is</i> the union box);
+                    push to <b>45&deg;</b> and fast and it climbs past <b>50%</b> &mdash;
+                    the bench worst cell measured <b>54.8%</b>.
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">EXACT &sub; UNION</span>
+                    <span class="pill idle" id="xSubPill">-</span>
+                </div>
+                <div class="note">
+                    every exact hit is a union hit, checked pair-for-pair over
+                    <b id="xSubN">0</b> seeded pairs across all angles. One exact hit
+                    without a union hit would light this red &mdash; the strict-subset
+                    guarantee, on stage.
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="gcRow">
+                    <span class="k">SELF-CHECK</span>
+                    <span class="pill idle" id="xVerPill">-</span>
+                </div>
+                <div class="note">
+                    the two anchors the ledger names: axis-aligned motion over-reports
+                    <b id="xAnchor0">-</b> (the hull is the union rect), and fast 45&deg;
+                    motion over-reports <b id="xAnchor45">-</b> (it exists to reject
+                    exactly that). <b id="xHero">-</b>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>scene</h2>
+                <div class="field">
+                    <label>motion angle <b id="xAngOut">45&deg;</b></label>
+                    <input type="range" id="xAngSlider" min="0" max="90" step="1" value="45">
+                </div>
+                <div class="field">
+                    <label>sweep speed <b id="xSpdOut">4.0 bw</b></label>
+                    <input type="range" id="xSpdSlider" min="5" max="60" step="1" value="40">
+                </div>
+                <div class="field">
+                    <label>lane gap <b id="xGapOut">1.4 bw</b></label>
+                    <input type="range" id="xGapSlider" min="0" max="40" step="1" value="14">
+                </div>
+                <div class="note" style="margin-top:10px">
+                    <code>sweptOverlapExact</code> is opt-in &mdash; the union stays the
+                    never-miss broadphase; you call the exact test by hand on the
+                    pairs you care about, after the cheap pass has flagged them.
+                </div>
+            </div>
+        </div>
     </aside>
 </main>
 
 <script type="module">
-import { createOverlap, VERSION, FORMAT_VERSION } from 'lite-overlap';
+import { createOverlap, sweptOverlap, sweptOverlapExact, VERSION, FORMAT_VERSION } from 'lite-overlap';
 import { DynamicBVH2D } from '@zakkster/lite-bvh';
 
 /* =======================================================================
@@ -1824,12 +1906,329 @@ const Scene04 = (() => {
 })();
 
 /* =======================================================================
+   SCENE 05 -- EXACT  (the O3.1 headline: the union's diagonal over-report,
+   rejected). Two unit boxes sweep along PARALLEL diagonals, offset across the
+   motion by an adjustable lane gap. The union broadphase tests union(prev,curr)
+   per box -- two axis-aligned rectangles that overlap in the middle -- so
+   sweptOverlap says HIT. But the true swept volumes are two thin diagonal
+   RIBBONS (each the convex hull of the box's 8 swept corners); at the right gap
+   they run parallel and never touch, so sweptOverlapExact says MISS. Every
+   verdict is the REAL library, called through the NAMED exports sweptOverlap /
+   sweptOverlapExact (which this scene also proves resolve -- a broken export
+   would fail the module import outright). A seeded batch reports the over-report
+   RATE at the live angle/speed: 0% axis-aligned (a self-check -- the hull IS the
+   union box), climbing past 50% on fast 45deg motion, matching the bench worst
+   cell (54.8%). Two cold gates assert the ledger's invariants: exact is a strict
+   SUBSET of union over a full-angle sweep, and the two anchors hold. Every
+   buffer is allocated once; the frame path allocates nothing.
+   ======================================================================= */
+const Scene05 = (() => {
+    const $aside = document.getElementById('aside05');
+    const $hint = document.getElementById('hint05');
+    const $xN = document.getElementById('xN');
+    const $xUnion = document.getElementById('xUnion');
+    const $xExact = document.getElementById('xExact');
+    const $xRej = document.getElementById('xRej');
+    const $xRatePill = document.getElementById('xRatePill');
+    const $xSubPill = document.getElementById('xSubPill');
+    const $xSubN = document.getElementById('xSubN');
+    const $xVerPill = document.getElementById('xVerPill');
+    const $xAnchor0 = document.getElementById('xAnchor0');
+    const $xAnchor45 = document.getElementById('xAnchor45');
+    const $xHero = document.getElementById('xHero');
+    const $xAngSlider = document.getElementById('xAngSlider');
+    const $xAngOut = document.getElementById('xAngOut');
+    const $xSpdSlider = document.getElementById('xSpdSlider');
+    const $xSpdOut = document.getElementById('xSpdOut');
+    const $xGapSlider = document.getElementById('xGapSlider');
+    const $xGapOut = document.getElementById('xGapOut');
+
+    // real library instance (proves ov.X === X); the scene calls the NAMED exports.
+    const xOv = createOverlap({ maxPairs: 4 });
+    void xOv;
+
+    // preallocated world boxes (unit box = 1 box-width) -----------------
+    const prevA = new Float32Array(4), currA = new Float32Array(4);
+    const prevB = new Float32Array(4), currB = new Float32Array(4);
+    const uA = new Float32Array(4), uB = new Float32Array(4);
+    // batch scratch (relative-offset sampling)
+    const bpA = new Float32Array(4), bcA = new Float32Array(4);
+    const bpB = new Float32Array(4), bcB = new Float32Array(4);
+    // screen scratch for hulls: 8 swept corners -> convex hull, alloc-free
+    const sxA = new Float32Array(8), syA = new Float32Array(8);
+    const sxB = new Float32Array(8), syB = new Float32Array(8);
+    const hxA = new Float32Array(8), hyA = new Float32Array(8);
+    const hxB = new Float32Array(8), hyB = new Float32Array(8);
+    let hnA = 0, hnB = 0;
+
+    // config (world; spd, gap in box-widths) ----------------------------
+    let angDeg = 45, spd = 4.0, gap = 1.6;
+    let mx = 0, my = 0;
+    let uHit = false, xHit = false;               // hero verdict (real library)
+
+    // fit: world (y-up) -> screen (y-down) ------------------------------
+    let scale = 1, ox = 0, oy = 0, cwx = 0, cwy = 0;
+    function WX(x) { return ox + (x - cwx) * scale; }
+    function WY(y) { return oy - (y - cwy) * scale; }
+
+    // deterministic PRNG (no Math.random, so every count is reproducible)
+    let _s = 0x1543beef >>> 0;
+    function reseed(v) { _s = v >>> 0; }
+    function rnd() {
+        _s = (_s + 0x6D2B79F5) | 0;
+        let t = _s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+
+    function setBoxC(o, cx, cy) { o[0] = cx - 0.5; o[1] = cy - 0.5; o[2] = cx + 0.5; o[3] = cy + 0.5; }
+    function uInto(o, a, b) {
+        o[0] = Math.min(a[0], b[0]); o[1] = Math.min(a[1], b[1]);
+        o[2] = Math.max(a[2], b[2]); o[3] = Math.max(a[3], b[3]);
+    }
+
+    /* ---- over-report rate over a seeded batch at a given config -------- */
+    let batchN = 0, batchU = 0, batchX = 0;
+    function runBatch(a, L, samples, seed) {
+        reseed(seed);
+        const th = a * Math.PI / 180, dx = L * Math.cos(th), dy = L * Math.sin(th);
+        const SPAN = L + 2.0;
+        let u = 0, x = 0;
+        setBoxC(bpA, 0, 0);
+        bcA[0] = bpA[0] + dx; bcA[1] = bpA[1] + dy; bcA[2] = bpA[2] + dx; bcA[3] = bpA[3] + dy;
+        for (let i = 0; i < samples; i++) {
+            const rx = (rnd() * 2 - 1) * SPAN, ry = (rnd() * 2 - 1) * SPAN;
+            setBoxC(bpB, rx, ry);
+            bcB[0] = bpB[0] + dx; bcB[1] = bpB[1] + dy; bcB[2] = bpB[2] + dx; bcB[3] = bpB[3] + dy;
+            if (sweptOverlap(bpA, bcA, bpB, bcB)) {          // NAMED export -- the union
+                u++;
+                if (sweptOverlapExact(bpA, bcA, bpB, bcB)) x++;   // NAMED export -- the ribbon
+            }
+        }
+        batchN = samples; batchU = u; batchX = x;
+        return u ? (u - x) / u : 0;
+    }
+
+    /* ---- cold gate: strict subset (exact => union) over a full sweep --- */
+    let subChecked = 0, subLeaks = 0;
+    function runSubsetGate() {
+        reseed(0x5afe0001);
+        let checked = 0, leaks = 0;
+        const Ls = [0.5, 1.5, 4.0];
+        for (let ai = 0; ai <= 90; ai += 6) {
+            const th = ai * Math.PI / 180;
+            for (let li = 0; li < 3; li++) {
+                const L = Ls[li], dx = L * Math.cos(th), dy = L * Math.sin(th), SPAN = L + 2.0;
+                setBoxC(bpA, 0, 0);
+                bcA[0] = bpA[0] + dx; bcA[1] = bpA[1] + dy; bcA[2] = bpA[2] + dx; bcA[3] = bpA[3] + dy;
+                for (let i = 0; i < 120; i++) {
+                    const rx = (rnd() * 2 - 1) * SPAN, ry = (rnd() * 2 - 1) * SPAN;
+                    setBoxC(bpB, rx, ry);
+                    bcB[0] = bpB[0] + dx; bcB[1] = bpB[1] + dy; bcB[2] = bpB[2] + dx; bcB[3] = bpB[3] + dy;
+                    // a hit the exact test keeps but the union rejects would be a subset break
+                    if (sweptOverlapExact(bpA, bcA, bpB, bcB) && !sweptOverlap(bpA, bcA, bpB, bcB)) leaks++;
+                    checked++;
+                }
+            }
+        }
+        subChecked = checked; subLeaks = leaks;
+    }
+
+    /* ---- hero geometry: two parallel diagonal ribbons ----------------- */
+    function rebuildHero() {
+        const th = angDeg * Math.PI / 180;
+        mx = spd * Math.cos(th); my = spd * Math.sin(th);
+        const px = -Math.sin(th), py = Math.cos(th);            // unit perpendicular
+        const axc = -mx / 2 - px * gap / 2, ayc = -my / 2 - py * gap / 2;
+        const bxc = -mx / 2 + px * gap / 2, byc = -my / 2 + py * gap / 2;
+        setBoxC(prevA, axc, ayc); setBoxC(currA, axc + mx, ayc + my);
+        setBoxC(prevB, bxc, byc); setBoxC(currB, bxc + mx, byc + my);
+        uInto(uA, prevA, currA); uInto(uB, prevB, currB);
+        uHit = sweptOverlap(prevA, currA, prevB, currB);        // NAMED export
+        xHit = sweptOverlapExact(prevA, currA, prevB, currB);   // NAMED export
+        fitHero();
+        buildHulls();
+    }
+
+    function fitHero() {
+        if (W < 8 || H < 8) return;
+        const minX = Math.min(uA[0], uB[0]), minY = Math.min(uA[1], uB[1]);
+        const maxX = Math.max(uA[2], uB[2]), maxY = Math.max(uA[3], uB[3]);
+        cwx = (minX + maxX) / 2; cwy = (minY + maxY) / 2;
+        const spanX = Math.max(maxX - minX, 1e-3), spanY = Math.max(maxY - minY, 1e-3);
+        const P = 60, topPad = 24;
+        const usableH = H - topPad;
+        scale = Math.min((W - 2 * P) / spanX, (usableH - 2 * P) / spanY);
+        if (scale > 150) scale = 150;
+        ox = W / 2; oy = topPad + usableH / 2;
+    }
+
+    function cornersInto(sx, sy, off, box) {
+        sx[off] = WX(box[0]); sy[off] = WY(box[1]);
+        sx[off + 1] = WX(box[2]); sy[off + 1] = WY(box[1]);
+        sx[off + 2] = WX(box[2]); sy[off + 2] = WY(box[3]);
+        sx[off + 3] = WX(box[0]); sy[off + 3] = WY(box[3]);
+    }
+    // gift-wrap the 8 swept corners; alloc-free, hull into hx/hy, returns count
+    function hull8(sx, sy, hx, hy) {
+        let start = 0;
+        for (let i = 1; i < 8; i++) {
+            if (sx[i] < sx[start] || (sx[i] === sx[start] && sy[i] < sy[start])) start = i;
+        }
+        let h = 0, p = start;
+        do {
+            hx[h] = sx[p]; hy[h] = sy[p]; h++;
+            let q = (p + 1) & 7;
+            for (let i = 0; i < 8; i++) {
+                const c = (sx[q] - sx[p]) * (sy[i] - sy[p]) - (sy[q] - sy[p]) * (sx[i] - sx[p]);
+                if (c < 0) q = i;
+                else if (c === 0) {
+                    const dq = (sx[q] - sx[p]) * (sx[q] - sx[p]) + (sy[q] - sy[p]) * (sy[q] - sy[p]);
+                    const di = (sx[i] - sx[p]) * (sx[i] - sx[p]) + (sy[i] - sy[p]) * (sy[i] - sy[p]);
+                    if (di > dq) q = i;
+                }
+            }
+            p = q;
+        } while (p !== start && h < 8);
+        return h;
+    }
+    function buildHulls() {
+        if (W < 8 || H < 8) return;
+        cornersInto(sxA, syA, 0, prevA); cornersInto(sxA, syA, 4, currA);
+        cornersInto(sxB, syB, 0, prevB); cornersInto(sxB, syB, 4, currB);
+        hnA = hull8(sxA, syA, hxA, hyA);
+        hnB = hull8(sxB, syB, hxB, hyB);
+    }
+
+    /* ---- draw (frame path; allocates nothing) ------------------------- */
+    let clk = 0;
+    function drawUnionRect(box) {
+        const sx0 = WX(box[0]), sy0 = WY(box[3]);
+        const w = (box[2] - box[0]) * scale, hgt = (box[3] - box[1]) * scale;
+        vctx.fillStyle = COL.exit; vctx.globalAlpha = 0.10; vctx.fillRect(sx0, sy0, w, hgt);
+        vctx.globalAlpha = 0.5; vctx.strokeStyle = COL.exit; vctx.lineWidth = 1;
+        vctx.setLineDash([4, 3]); vctx.strokeRect(sx0 + 0.5, sy0 + 0.5, w, hgt); vctx.setLineDash([]);
+        vctx.globalAlpha = 1;
+    }
+    function drawHull(hx, hy, n) {
+        if (n < 2) return;
+        vctx.beginPath(); vctx.moveTo(hx[0], hy[0]);
+        for (let i = 1; i < n; i++) vctx.lineTo(hx[i], hy[i]);
+        vctx.closePath();
+        vctx.fillStyle = COL.enter; vctx.globalAlpha = 0.16; vctx.fill();
+        vctx.globalAlpha = 0.9; vctx.strokeStyle = COL.enter; vctx.lineWidth = 1.5; vctx.stroke();
+        vctx.globalAlpha = 1;
+    }
+    function drawSlider(prev, curr, t) {
+        const cx = (prev[0] + prev[2]) / 2 + (curr[0] - prev[0]) * t;
+        const cy = (prev[1] + prev[3]) / 2 + (curr[1] - prev[1]) * t;
+        const s = scale;
+        vctx.fillStyle = COL.steady; vctx.globalAlpha = 0.92;
+        vctx.fillRect(WX(cx - 0.5), WY(cy + 0.5), s, s);
+        vctx.globalAlpha = 1;
+    }
+    function draw() {
+        vctx.clearRect(0, 0, W, H);
+        if (W < 8 || H < 8) return;
+        const over = uHit && !xHit;
+        drawUnionRect(uA); drawUnionRect(uB);          // what sweptOverlap tests
+        drawHull(hxA, hyA, hnA); drawHull(hxB, hyB, hnB);  // what sweptOverlapExact tests
+        const ph = (clk % 160) / 160;
+        const t = ph < 0.5 ? ph * 2 : (1 - ph) * 2;    // ping-pong prev<->curr
+        drawSlider(prevA, currA, t); drawSlider(prevB, currB, t);
+
+        vctx.textAlign = 'left';
+        vctx.font = '700 13px "SF Mono", ui-monospace, monospace';
+        let label, col;
+        if (uHit && xHit) { label = 'UNION HIT  +  EXACT HIT  --  a real overlap'; col = COL.enter; }
+        else if (over) { label = 'UNION HIT  +  EXACT MISS  --  over-report, rejected'; col = COL.exit; }
+        else { label = 'UNION MISS  +  EXACT MISS  --  clear'; col = COL.text; }
+        vctx.fillStyle = col; vctx.fillText(label, 16, 22);
+        vctx.font = '600 10px "SF Mono", ui-monospace, monospace';
+        vctx.fillStyle = COL.exit; vctx.fillText('- - -  union boxes (broadphase)', 16, 42);
+        vctx.fillStyle = COL.enter; vctx.fillText('___  swept ribbons (exact)', 16, 56);
+    }
+
+    function publish() {
+        $xN.textContent = batchN;
+        $xUnion.textContent = batchU;
+        $xExact.textContent = batchX;
+        $xRej.textContent = (batchU - batchX);
+        const rate = batchU ? Math.round((batchU - batchX) / batchU * 100) : 0;
+        $xRatePill.textContent = rate + '%';
+        $xRatePill.className = 'pill ' + (rate === 0 ? 'zero' : 'idle');
+        $xHero.textContent = uHit
+            ? (xHit ? 'hero: both hit -- a real overlap.' : 'hero: union hits, exact rejects -- over-report.')
+            : 'hero: neither hits -- clear.';
+    }
+
+    /* ---- cold gates: run once on first open --------------------------- */
+    let gated = false;
+    function runGates() {
+        runSubsetGate();
+        $xSubN.textContent = subChecked;
+        $xSubPill.textContent = subLeaks === 0 ? 'clean' : (subLeaks + ' LEAK');
+        $xSubPill.className = 'pill ' + (subLeaks === 0 ? 'zero' : 'hot');
+        const r0 = runBatch(0, 4.0, 3000, 0x1543beef);
+        const r45 = runBatch(45, 4.0, 3000, 0x1543beef);
+        $xAnchor0.textContent = Math.round(r0 * 100) + '%';
+        $xAnchor45.textContent = Math.round(r45 * 100) + '%';
+        const ok = (r0 === 0) && (r45 > 0);
+        $xVerPill.textContent = ok ? '2 / 2' : 'FAIL';
+        $xVerPill.className = 'pill ' + (ok ? 'zero' : 'hot');
+        if (!ok && typeof console !== 'undefined') {
+            console.warn('scene05 anchors:', 'axis0=' + r0, '45deg=' + r45);
+        }
+    }
+
+    function applyConfig() {
+        runBatch(angDeg, spd, 3000, 0x1543beef);
+        rebuildHero();
+        publish();
+    }
+
+    /* ---- controls (wired once) ---------------------------------------- */
+    $xAngSlider.addEventListener('input', () => {
+        angDeg = +$xAngSlider.value; $xAngOut.textContent = angDeg + '\u00b0'; applyConfig();
+    });
+    $xSpdSlider.addEventListener('input', () => {
+        spd = +$xSpdSlider.value / 10; $xSpdOut.textContent = spd.toFixed(1) + ' bw'; applyConfig();
+    });
+    $xGapSlider.addEventListener('input', () => {
+        gap = +$xGapSlider.value / 10; $xGapOut.textContent = gap.toFixed(1) + ' bw'; applyConfig();
+    });
+
+    let primed = false;
+    return {
+        id: '05',
+        enter() {
+            $aside.hidden = false; $hint.hidden = false;
+            if (!gated) { runGates(); gated = true; }
+            applyConfig();
+        },
+        exit() { $aside.hidden = true; $hint.hidden = true; },
+        onResize() {
+            fitHero(); buildHulls();
+            if (!primed && W >= 64 && H >= 64) { draw(); publish(); primed = true; }
+        },
+        frame() {
+            if (W < 64 || H < 64) return;
+            clk++;
+            draw();
+            if ((clk & 31) === 0) publish();
+        },
+    };
+})();
+
+/* =======================================================================
    BOOT
    ======================================================================= */
 scenes['01'] = Scene01;
 scenes['02'] = Scene02;
 scenes['03'] = Scene03;
 scenes['04'] = Scene04;
+scenes['05'] = Scene05;
 
 document.getElementById('themeBtn').addEventListener('click', () => {
     const cur = document.documentElement.getAttribute('data-theme');
